@@ -11,17 +11,45 @@ from flask_cors import CORS
 env_path = os.path.join(os.path.dirname(__file__), '.env')
 load_dotenv(dotenv_path=env_path) if os.path.exists(env_path) else load_dotenv()
 
-DB_USER = os.getenv("DB_USER", "root")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "")
-DB_HOST = os.getenv("DB_HOST", "localhost")
-DB_PORT = os.getenv("DB_PORT", "3306")
-DB_NAME = os.getenv("DB_NAME", "big_deal")
+import socket
 
 app = Flask(__name__)
 CORS(app)
 
-# MySQL Connection configuration
-app.config['SQLALCHEMY_DATABASE_URI'] = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+# Resilient Database Connection Configuration
+database_url = os.getenv("DATABASE_URL")
+sqlite_fallback_path = os.path.join(os.path.dirname(__file__), 'shop.db')
+
+if database_url:
+    if database_url.startswith("postgres://"):
+        database_url = database_url.replace("postgres://", "postgresql://", 1)
+    app.config['SQLALCHEMY_DATABASE_URI'] = database_url
+    print(f"Connecting to production DATABASE_URL")
+else:
+    db_user = os.getenv("DB_USER", "root")
+    db_pass = os.getenv("DB_PASSWORD", "")
+    db_host = os.getenv("DB_HOST", "localhost")
+    db_port = int(os.getenv("DB_PORT", "3306"))
+    db_name = os.getenv("DB_NAME", "big_deal")
+    
+    # Check if MySQL server is reachable
+    mysql_online = False
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(1.5)
+        res = sock.connect_ex((db_host, db_port))
+        sock.close()
+        mysql_online = (res == 0)
+    except Exception:
+        mysql_online = False
+
+    if mysql_online:
+        print(f"MySQL reachable on {db_host}:{db_port}. Connecting to MySQL...")
+        app.config['SQLALCHEMY_DATABASE_URI'] = f"mysql+pymysql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}"
+    else:
+        print(f"MySQL not detected on {db_host}:{db_port}. Falling back to SQLite database ({sqlite_fallback_path})")
+        app.config['SQLALCHEMY_DATABASE_URI'] = f"sqlite:///{sqlite_fallback_path}"
+
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 try:
