@@ -58,6 +58,10 @@ class Order(db.Model):
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     customer_name = db.Column(db.String(255), nullable=False)
     customer_email = db.Column(db.String(255), nullable=False)
+    customer_phone = db.Column(db.String(30), nullable=False, default='')
+    address = db.Column(db.Text, nullable=False)
+    city = db.Column(db.String(100), nullable=False, default='')
+    pincode = db.Column(db.String(10), nullable=False, default='')
     total = db.Column(db.Float, nullable=False)
     promo_code = db.Column(db.String(50), nullable=True)
     discount_amount = db.Column(db.Float, nullable=False, default=0.0)
@@ -72,6 +76,10 @@ class Order(db.Model):
             "id": self.id,
             "customer_name": self.customer_name,
             "customer_email": self.customer_email,
+            "customer_phone": self.customer_phone,
+            "address": self.address,
+            "city": self.city,
+            "pincode": self.pincode,
             "total": self.total,
             "promo_code": self.promo_code,
             "discount_amount": self.discount_amount,

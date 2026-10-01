@@ -59,6 +59,10 @@ class ProductImage(models.Model):
 class Order(models.Model):
     customer_name = models.CharField(max_length=255)
     customer_email = models.CharField(max_length=255)
+    customer_phone = models.CharField(max_length=30, blank=True, default='')
+    address = models.TextField(blank=True, default='')
+    city = models.CharField(max_length=100, blank=True, default='')
+    pincode = models.CharField(max_length=10, blank=True, default='')
     total = models.FloatField()
     promo_code = models.CharField(max_length=50, null=True, blank=True)
     discount_amount = models.FloatField(default=0.0)
@@ -77,6 +81,10 @@ class Order(models.Model):
             "id": self.id,
             "customer_name": self.customer_name,
             "customer_email": self.customer_email,
+            "customer_phone": self.customer_phone,
+            "address": self.address,
+            "city": self.city,
+            "pincode": self.pincode,
             "total": self.total,
             "promo_code": self.promo_code,
             "discount_amount": self.discount_amount,

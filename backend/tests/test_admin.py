@@ -1,37 +1,40 @@
 import os
-
-from fastapi.testclient import TestClient
-
-from backend.main import app
+import importlib
+import pytest
 
 os.environ.setdefault("ADMIN_USERNAME", "admin")
 os.environ.setdefault("ADMIN_PASSWORD", "admin123")
 
-client = TestClient(app)
+@pytest.fixture()
+def client():
+    app_module = importlib.import_module("backend.app")
+    app_module.app.config.update(TESTING=True)
+    with app_module.app.test_client() as client:
+        yield client
 
 
-def test_admin_login_returns_token_for_valid_credentials():
+def test_admin_login_returns_token_for_valid_credentials(client):
     response = client.post(
         "/api/admin/login",
         json={"username": "admin", "password": "admin123"},
     )
 
     assert response.status_code == 200
-    assert "token" in response.json()
+    assert "token" in response.get_json()
 
 
-def test_admin_products_requires_authentication():
-    response = client.get("/api/admin/products")
+def test_admin_products_requires_authentication(client):
+    response = client.post("/api/admin/products", json={"title": "Test Product"})
 
     assert response.status_code == 401
 
 
-def test_admin_can_create_product():
+def test_admin_can_create_product(client):
     login_response = client.post(
         "/api/admin/login",
         json={"username": "admin", "password": "admin123"},
     )
-    token = login_response.json()["token"]
+    token = login_response.get_json()["token"]
 
     response = client.post(
         "/api/admin/products",
@@ -44,5 +47,8 @@ def test_admin_can_create_product():
         headers={"Authorization": f"Bearer {token}"},
     )
 
-    assert response.status_code == 200
-    assert response.json()["title"] == "Smart Lamp"
+    assert response.status_code == 201
+    assert response.get_json()["title"] == "Smart Lamp"
+    pid = response.get_json().get("id")
+    if pid:
+        client.delete(f"/api/admin/products/{pid}", headers={"Authorization": f"Bearer {token}"})
