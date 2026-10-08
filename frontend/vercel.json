@@ -5,6 +5,10 @@
       "destination": "https://big-deal-gslk.onrender.com/api/:path*"
     },
     {
+      "source": "/images/:path*",
+      "destination": "https://big-deal-gslk.onrender.com/images/:path*"
+    },
+    {
       "source": "/(.*)",
       "destination": "/index.html"
     }

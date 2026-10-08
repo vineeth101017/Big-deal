@@ -682,11 +682,15 @@ def delete_admin_promo(code):
     return jsonify({"success": True, "message": f"Promo code {code} deleted"})
 
 
-@app.post("/api/promos/validate")
+@app.route("/api/promos/validate", methods=["GET", "POST"])
 def validate_promo():
     payload = request.get_json(silent=True) or {}
-    code = (payload.get("code") or "").strip().upper()
-    subtotal = float(payload.get("subtotal") or 0.0)
+    code = (payload.get("code") or request.args.get("code") or "").strip().upper()
+    raw_subtotal = payload.get("subtotal") or payload.get("cart_total") or request.args.get("cart_total") or request.args.get("subtotal") or 0.0
+    try:
+        subtotal = float(raw_subtotal)
+    except (ValueError, TypeError):
+        subtotal = 0.0
 
     if not code:
         return jsonify({"valid": False, "detail": "Promo code is required"}), 400

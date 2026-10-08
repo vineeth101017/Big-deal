@@ -98,8 +98,10 @@ let globalCurrency = 'INR';
 
 function formatCurrency(value, currency = globalCurrency) {
   const conf = CURRENCY_CONFIG[currency] || CURRENCY_CONFIG.INR;
-  const baseValue = (value || 0);
-  const inrValue = baseValue > 1000 ? baseValue : baseValue * 83.5;
+  const baseValue = Number(value) || 0;
+  // Only convert prices that are USD cents (decimal values under 400, e.g. 199.99, 45.99)
+  const isUsdProduct = baseValue > 0 && baseValue < 400 && String(baseValue).includes('.');
+  const inrValue = isUsdProduct ? baseValue * 83.5 : baseValue;
   const converted = inrValue * conf.rate;
   return new Intl.NumberFormat(conf.locale, {
     style: 'currency',
@@ -196,15 +198,15 @@ function getSmartProductFallback(title = '', category = '', rawUrl = '') {
 
   // 1. Sunglasses / Eyewear / Shades
   if (
-    combined.includes('sunglass') || 
-    combined.includes('sun-glass') || 
-    combined.includes('sun glass') || 
-    combined.includes('goggle') || 
-    combined.includes('shades') || 
-    combined.includes('spectacle') || 
-    combined.includes('optics') || 
-    combined.includes('rayban') || 
-    combined.includes('aviator') || 
+    combined.includes('sunglass') ||
+    combined.includes('sun-glass') ||
+    combined.includes('sun glass') ||
+    combined.includes('goggle') ||
+    combined.includes('shades') ||
+    combined.includes('spectacle') ||
+    combined.includes('optics') ||
+    combined.includes('rayban') ||
+    combined.includes('aviator') ||
     combined.includes('wayfarer') ||
     (combined.includes('glasses') && !combined.includes('sunglasses'))
   ) {
@@ -702,7 +704,7 @@ function App() {
   const [currency, setCurrency] = useState('INR');
   const [soundEnabled, setSoundEnabled] = useState(true);
   globalCurrency = currency;
-  
+
   // Real-World Pincode & Hyperlocal Logistics State
   const [deliveryPincode, setDeliveryPincode] = useState('600053');
   const [pincodeDetails, setPincodeDetails] = useState({
@@ -1017,10 +1019,14 @@ function App() {
 
   const claimRewardPromo = () => {
     if (!wonReward) return;
+    const isFlat = wonReward.code.includes('CASH') || wonReward.code.includes('200');
+    const discountVal = Number(wonReward.discount) || 0;
+    const amount = isFlat ? Math.min(discountVal, cartTotal) : Math.round((cartTotal * discountVal) / 100);
     setAppliedPromo({
       code: wonReward.code,
-      discount_type: wonReward.code.includes('CASH') || wonReward.code.includes('200') ? 'flat' : 'percent',
-      discount_value: wonReward.discount,
+      discount_type: isFlat ? 'fixed' : 'percent',
+      discount_value: discountVal,
+      discount_amount: amount,
       description: `${wonReward.text} (Lucky Spin Reward)`
     });
     showToast(`🎉 Coupon ${wonReward.code} applied to your cart!`, 'success');
@@ -1480,14 +1486,14 @@ function App() {
           setPriceRange(data);
         }
       })
-      .catch(() => {});
+      .catch(() => { });
 
     try {
       const savedWishlist = JSON.parse(localStorage.getItem('wishlist') || '[]');
       setWishlist(savedWishlist);
       const savedRecent = JSON.parse(localStorage.getItem('recently_viewed') || '[]');
       setRecentlyViewed(savedRecent);
-    } catch (e) {}
+    } catch (e) { }
   }, []);
 
   // Filter & Search Logic
@@ -1596,7 +1602,7 @@ function App() {
       target = { ...productOrTitle };
     } else if (typeof productOrTitle === 'string') {
       const found = products.find(p => p.title.toLowerCase().includes(productOrTitle.toLowerCase())) ||
-                    FEATURED_DEALS.find(p => p.title.toLowerCase().includes(productOrTitle.toLowerCase()));
+        FEATURED_DEALS.find(p => p.title.toLowerCase().includes(productOrTitle.toLowerCase()));
       if (found) target = { ...found };
     }
 
@@ -1643,9 +1649,9 @@ function App() {
     });
 
     // Load reviews
-    if (target.id && target.id <= 100) {
+    if (target.id) {
       fetch(`/api/products/${target.id}/reviews`)
-        .then((res) => res.json())
+        .then((res) => (res.ok ? res.json() : []))
         .then((data) => setModalReviews(data && data.length > 0 ? data : [
           { id: 1, username: 'Vikram Sharma', rating: 5, comment: 'Exceptional build quality and sound clarity. Delivered in less than 24 hours with Prime!', created_at: new Date().toISOString() },
           { id: 2, username: 'Pooja Iyer', rating: 5, comment: 'Totally worth every rupee! Best deal on Big Deal.', created_at: new Date().toISOString() }
@@ -1662,10 +1668,19 @@ function App() {
   };
 
   const handleApplyPromo = async (codeToUse) => {
-    const code = (codeToUse || promoCodeInput).trim().toUpperCase();
+    let code = '';
+    if (typeof codeToUse === 'string') {
+      code = codeToUse.trim().toUpperCase();
+    } else if (promoCodeInput) {
+      code = promoCodeInput.trim().toUpperCase();
+    }
     if (!code) return;
     try {
-      const res = await fetch(`/api/promos/validate?code=${code}&cart_total=${cartTotal}`);
+      const res = await fetch('/api/promos/validate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code, subtotal: cartTotal, cart_total: cartTotal })
+      });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || 'Invalid voucher code');
       setAppliedPromo(data);
@@ -1718,12 +1733,25 @@ function App() {
     }
     setIsCheckingOut(true);
     try {
+      const discountVal = appliedPromo
+        ? (appliedPromo.discount_amount != null
+          ? Number(appliedPromo.discount_amount)
+          : (appliedPromo.discount_type === 'percent'
+            ? Math.round((cartTotal * (appliedPromo.discount_value || 0)) / 100)
+            : Number(appliedPromo.discount_value || 0)))
+        : 0;
+      const finalTotal = Math.max(0, cartTotal - discountVal) + shippingCost;
+
       const response = await fetch('/api/checkout', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           customer_name: shippingData.fullName,
           customer_email: shippingData.email,
+          customer_phone: shippingData.phone || '',
+          address: shippingData.address || '',
+          city: shippingData.city || '',
+          pincode: shippingData.zipCode || deliveryPincode || '',
           items: cart,
           promo_code: appliedPromo ? appliedPromo.code : null,
           shipping_method: shippingMethod,
@@ -1737,7 +1765,6 @@ function App() {
       const estDelivery = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toLocaleDateString('en-IN', {
         weekday: 'short', month: 'short', day: 'numeric'
       });
-      const finalTotal = (appliedPromo ? Math.max(0, cartTotal - appliedPromo.discount_amount) : cartTotal) + shippingCost;
 
       const orderReceipt = {
         order_id: data.order_id,
@@ -1751,7 +1778,7 @@ function App() {
         shipping_cost: shippingCost,
         items: [...cart],
         subtotal: cartTotal,
-        discount_amount: appliedPromo ? appliedPromo.discount_amount : 0,
+        discount_amount: discountVal,
         promo_code: appliedPromo ? appliedPromo.code : null,
         total: finalTotal,
         payment_method: paymentMethod === 'card' ? `Credit Card (•••• ${cardData.number.slice(-4)})` : paymentMethod === 'cod' ? 'Cash on Delivery / UPI Pay on Delivery' : 'Big Deal Pay / NetBanking',
@@ -1806,7 +1833,7 @@ function App() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || 'Invalid admin credentials');
-      
+
       localStorage.setItem('bigdeal_admin_token', data.token);
       setAdminToken(data.token);
       setAdminLoginForm({ username: 'admin', password: '' });
@@ -1897,7 +1924,7 @@ function App() {
 
       const res = await fetch('/api/products', {
         method: 'POST',
-        headers: { 
+        headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${adminToken}`
         },
@@ -1949,7 +1976,7 @@ function App() {
 
     if (!window.confirm(`Are you sure you want to remove "${title}" from the catalog?`)) return;
     try {
-      const res = await fetch(`/api/products/${productId}`, { 
+      const res = await fetch(`/api/products/${productId}`, {
         method: 'DELETE',
         headers: {
           'Authorization': `Bearer ${adminToken}`
@@ -2073,7 +2100,7 @@ function App() {
       setProducts((prev) => prev.map((p) => (p.id === editingProduct.id ? { ...p, ...updatedProduct } : p)));
       setFilteredProducts((prev) => prev.map((p) => (p.id === editingProduct.id ? { ...p, ...updatedProduct } : p)));
       setCategories((prev) => Array.from(new Set([...prev, categoryFinal])));
-      
+
       // Update cart and wishlist if item present
       setCart((prev) => prev.map((it) => (it.id === editingProduct.id ? { ...it, title: updatedProduct.title, price: updatedProduct.price, image_url: updatedProduct.image_url } : it)));
       setWishlist((prev) => prev.map((it) => (it.id === editingProduct.id ? { ...it, title: updatedProduct.title, price: updatedProduct.price, image_url: updatedProduct.image_url } : it)));
@@ -2274,8 +2301,8 @@ function App() {
                 <span>{String(timeLeft.hours).padStart(2, '0')}h : {String(timeLeft.minutes).padStart(2, '0')}m : {String(timeLeft.seconds).padStart(2, '0')}s</span>
               </div>
             </div>
-            <button 
-              type="button" 
+            <button
+              type="button"
               className="flash-action-btn"
               onClick={() => {
                 handleApplyPromo('WELCOME10');
@@ -2284,9 +2311,9 @@ function App() {
             >
               Apply WELCOME10 (-10%)
             </button>
-            <button 
-              type="button" 
-              className="flash-close-btn" 
+            <button
+              type="button"
+              className="flash-close-btn"
               onClick={() => setShowFlashBanner(false)}
               title="Close Banner"
             >
@@ -2320,7 +2347,7 @@ function App() {
 
           {/* Amazon Integrated Search Bar */}
           <form className="amazon-search-bar" onSubmit={handleSearchSubmit}>
-            <select 
+            <select
               className="search-category-dropdown"
               value={selectedCategory}
               onChange={(e) => setSelectedCategory(e.target.value)}
@@ -2332,8 +2359,8 @@ function App() {
             </select>
 
             <div className="search-input-wrap">
-              <input 
-                type="text" 
+              <input
+                type="text"
                 className="amazon-search-input"
                 placeholder={isListeningVoice ? "Listening... speak now" : "Search Big Deal.in (e.g. Sony headphones, watch)"}
                 value={searchQuery}
@@ -2343,9 +2370,9 @@ function App() {
               />
 
               {/* Voice Search Microphone Trigger */}
-              <button 
-                type="button" 
-                className={`voice-search-btn ${isListeningVoice ? 'listening' : ''}`} 
+              <button
+                type="button"
+                className={`voice-search-btn ${isListeningVoice ? 'listening' : ''}`}
                 onClick={handleVoiceSearchToggle}
                 title={isListeningVoice ? "Stop voice listening" : "Search with Voice"}
               >
@@ -2353,9 +2380,9 @@ function App() {
               </button>
 
               {/* Big Deal Lens Visual Search Trigger */}
-              <button 
-                type="button" 
-                className="lens-search-btn" 
+              <button
+                type="button"
+                className="lens-search-btn"
                 onClick={() => {
                   setIsLensOpen(true);
                   playAudioChime('click', soundEnabled);
@@ -2409,8 +2436,8 @@ function App() {
                   {searchSuggestions.length > 0 && (
                     <ul className="suggestions-items-ul">
                       {searchSuggestions.map((item) => (
-                        <li 
-                          key={item.id} 
+                        <li
+                          key={item.id}
                           className="amazon-suggestion-item"
                           onMouseDown={() => {
                             openProductDetails(item);
@@ -2432,9 +2459,9 @@ function App() {
               )}
             </div>
 
-            <button 
-              type="submit" 
-              className="search-submit-btn" 
+            <button
+              type="submit"
+              className="search-submit-btn"
               title="Search"
               style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}
             >
@@ -2443,8 +2470,8 @@ function App() {
           </form>
 
           {/* Theme Switcher */}
-          <div 
-            className="nav-box-hover nav-theme-btn" 
+          <div
+            className="nav-box-hover nav-theme-btn"
             onClick={toggleTheme}
             title={`Switch to ${theme === 'light' ? 'Midnight Luxury Dark' : 'Classic Day'} Mode`}
           >
@@ -2462,8 +2489,8 @@ function App() {
           </div>
 
           {/* Language / Flag Switcher */}
-          <div 
-            className="nav-box-hover nav-lang-btn" 
+          <div
+            className="nav-box-hover nav-lang-btn"
             title="Change Currency / Language"
             onClick={() => setIsCurrencyModalOpen(true)}
           >
@@ -2475,8 +2502,8 @@ function App() {
           </div>
 
           {/* Account & Lists */}
-          <div 
-            className="nav-box-hover nav-account-btn" 
+          <div
+            className="nav-box-hover nav-account-btn"
             onClick={() => setActiveView('account')}
           >
             <span className="nav-account-line1">
@@ -2488,8 +2515,8 @@ function App() {
           </div>
 
           {/* Returns & Orders */}
-          <div 
-            className="nav-box-hover nav-orders-btn" 
+          <div
+            className="nav-box-hover nav-orders-btn"
             onClick={() => {
               setActiveView('account');
               setAccountSubTab('orders');
@@ -2500,8 +2527,8 @@ function App() {
           </div>
 
           {/* Shopping Cart */}
-          <div 
-            className="nav-box-hover nav-cart-btn" 
+          <div
+            className="nav-box-hover nav-cart-btn"
             onClick={() => {
               setIsCartOpen(true);
               playAudioChime('click', soundEnabled);
@@ -2518,8 +2545,8 @@ function App() {
         {/* SECONDARY SUB-NAVBAR (DARK SLATE #232f3e) */}
         <div className="amazon-subnav">
           <div className="subnav-left-links">
-            <button 
-              type="button" 
+            <button
+              type="button"
               className="subnav-hamburger-btn"
               onClick={() => setIsSideMenuOpen(true)}
               style={{ display: 'inline-flex', alignItems: 'center', gap: '5px' }}
@@ -2527,18 +2554,18 @@ function App() {
               <Menu size={16} />
               <strong>All</strong>
             </button>
-            <button 
-              type="button" 
-              className="subnav-link subnav-spin-pill" 
+            <button
+              type="button"
+              className="subnav-link subnav-spin-pill"
               onClick={() => setIsSpinWheelOpen(true)}
               title="Spin the Lucky Wheel for instant promo codes!"
             >
               <PartyPopper size={14} />
               <span>Spin & Win</span>
             </button>
-            <button 
-              type="button" 
-              className="subnav-link" 
+            <button
+              type="button"
+              className="subnav-link"
               style={{ color: '#60a5fa', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: '4px' }}
               onClick={() => setIsAIOpen(true)}
               title="Chat with BigDeal Genius AI Shopping Assistant"
@@ -2546,9 +2573,9 @@ function App() {
               <Bot size={15} />
               <span>Genius AI</span>
             </button>
-            <button 
-              type="button" 
-              className="subnav-link" 
+            <button
+              type="button"
+              className="subnav-link"
               style={{ color: '#f472b6', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: '4px' }}
               onClick={() => {
                 setMiniTvProduct(products[0]);
@@ -2576,17 +2603,20 @@ function App() {
               Bestsellers
             </button>
             <button type="button" className="subnav-link" onClick={() => {
-              const el = document.getElementById('todays-deals-rail');
-              el?.scrollIntoView({ behavior: 'smooth' });
+              setActiveView('shop');
+              setTimeout(() => {
+                const el = document.getElementById('todays-deals-rail');
+                el?.scrollIntoView({ behavior: 'smooth' });
+              }, 60);
             }}>
               Today's Deals
             </button>
             <button type="button" className="subnav-link" onClick={() => setActiveView('account')}>
               Customer Service
             </button>
-            <button 
-              type="button" 
-              className={`subnav-link ${activeView === 'admin' ? 'active' : ''}`} 
+            <button
+              type="button"
+              className={`subnav-link ${activeView === 'admin' ? 'active' : ''}`}
               onClick={() => setActiveView('admin')}
               style={adminToken ? { color: '#febd69', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: '4px' } : { display: 'inline-flex', alignItems: 'center', gap: '4px' }}
             >
@@ -2594,8 +2624,8 @@ function App() {
             </button>
           </div>
 
-          <div 
-            className="subnav-promo-banner" 
+          <div
+            className="subnav-promo-banner"
             style={{ cursor: 'pointer' }}
             onClick={() => {
               setPrimeOnly(true);
@@ -2640,8 +2670,8 @@ function App() {
             <div className="side-drawer-section">
               <div className="side-drawer-section-title">Shop by Category</div>
               {categories.map((cat) => (
-                <div 
-                  key={cat} 
+                <div
+                  key={cat}
                   className="side-drawer-item"
                   onClick={() => {
                     setSelectedCategory(cat);
@@ -2685,402 +2715,402 @@ function App() {
             {!searchQuery.trim() && (
               <>
                 {/* HERO SHOWCASE TOP ROW (MATCHING SCREENSHOT 1) */}
-            <div className="amazon-hero-container">
-              <div className="hero-cards-grid">
-                
-                {/* 1) Everything under ₹499 (Orange Card) */}
-                <div className="amazon-deal-card card-orange-feature">
-                  <div>
-                    <h3 className="deal-card-title">Everything under ₹499</h3>
-                    <p className="deal-card-subtitle">Fashion, home & more</p>
-                    <div className="orange-badges-row">
-                      <span className="orange-badge-pill" style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-                        <Truck size={13} /> Free Delivery
-                      </span>
-                      <span className="orange-badge-pill" style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-                        <RotateCcw size={13} /> Quick Refunds
-                      </span>
-                    </div>
+                <div className="amazon-hero-container">
+                  <div className="hero-cards-grid">
 
-                    <div className="orange-tiles-grid">
-                      {[
-                        { name: 'Watches', img: 'https://images.unsplash.com/photo-1524805444758-089113d48a6d?auto=format&fit=crop&w=300&q=80', deal: FEATURED_DEALS[0] },
-                        { name: 'Jackets', img: 'https://images.unsplash.com/photo-1551028719-00167b16eac5?auto=format&fit=crop&w=300&q=80', deal: { title: 'Windproof Thermal Winter Jacket', price: 499, category: 'Travel', image_url: 'https://images.unsplash.com/photo-1551028719-00167b16eac5?auto=format&fit=crop&w=600&q=80' } },
-                        { name: 'Cookware', img: 'https://images.unsplash.com/photo-1584990347449-397a6f235b2e?auto=format&fit=crop&w=300&q=80', deal: FEATURED_DEALS[9] },
-                        { name: 'Handbags', img: 'https://images.unsplash.com/photo-1584917865442-de89df76afd3?auto=format&fit=crop&w=300&q=80', deal: { title: 'Designer Vegan Leather Tote Bag', price: 489, category: 'Travel', image_url: 'https://images.unsplash.com/photo-1584917865442-de89df76afd3?auto=format&fit=crop&w=600&q=80' } },
-                        { name: 'Gadgets', img: 'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?auto=format&fit=crop&w=300&q=80', deal: FEATURED_DEALS[8] },
-                        { name: 'Lamps', img: 'https://images.unsplash.com/photo-1507473885765-e6ed057f782c?auto=format&fit=crop&w=300&q=80', deal: { title: 'Nordic Wooden Ambient Table Lamp', price: 399, category: 'Furniture', image_url: 'https://images.unsplash.com/photo-1507473885765-e6ed057f782c?auto=format&fit=crop&w=600&q=80' } },
-                        { name: 'Jerseys', img: 'https://images.unsplash.com/photo-1576566588028-4147f3842f27?auto=format&fit=crop&w=300&q=80', deal: { title: 'Breathable Dry-Fit Sports Jersey', price: 299, category: 'Travel', image_url: 'https://images.unsplash.com/photo-1576566588028-4147f3842f27?auto=format&fit=crop&w=600&q=80' } },
-                        { name: 'Skincare', img: 'https://images.unsplash.com/photo-1556228720-195a672e8a03?auto=format&fit=crop&w=300&q=80', deal: { title: 'Organic Vitamin C Radiant Face Serum', price: 349, category: 'Travel', image_url: 'https://images.unsplash.com/photo-1556228720-195a672e8a03?auto=format&fit=crop&w=600&q=80' } },
-                        { name: 'Essentials', img: 'https://images.unsplash.com/photo-1583394838336-acd977736f90?auto=format&fit=crop&w=300&q=80', deal: { title: 'Fast Charging Braided USB-C Cable (2m)', price: 199, category: 'Electronics', image_url: 'https://images.unsplash.com/photo-1583394838336-acd977736f90?auto=format&fit=crop&w=600&q=80' } }
-                      ].map((tile, i) => (
-                        <div key={i} className="orange-tile-item" onClick={() => openProductDetails(tile.deal)}>
-                          <img src={tile.img} alt={tile.name} className="orange-tile-img" />
-                          <div className="orange-tile-label">{tile.name}</div>
+                    {/* 1) Everything under ₹499 (Orange Card) */}
+                    <div className="amazon-deal-card card-orange-feature">
+                      <div>
+                        <h3 className="deal-card-title">Everything under ₹499</h3>
+                        <p className="deal-card-subtitle">Fashion, home & more</p>
+                        <div className="orange-badges-row">
+                          <span className="orange-badge-pill" style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                            <Truck size={13} /> Free Delivery
+                          </span>
+                          <span className="orange-badge-pill" style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                            <RotateCcw size={13} /> Quick Refunds
+                          </span>
                         </div>
-                      ))}
-                    </div>
-                  </div>
-                  <span className="deal-card-footer-link" style={{ color: '#ffffff', cursor: 'pointer' }} onClick={() => openProductDetails(FEATURED_DEALS[0])}>
-                    See all offers ›
-                  </span>
-                </div>
 
-                {/* 2) Pots & planters (Large Image Banner Card) */}
-                <div className="amazon-deal-card">
-                  <div>
-                    <h3 className="deal-card-title">Up to 70% off | Pots & planters</h3>
-                    <p className="deal-card-subtitle">Give your plants a stylish home</p>
-                    <div className="card-large-image-wrap" onClick={() => openProductDetails(FEATURED_DEALS[1])}>
-                      <img 
-                        src="https://images.unsplash.com/photo-1485955900006-10f4d324d411?auto=format&fit=crop&w=600&q=80" 
-                        alt="Pots and Planters" 
-                        className="card-large-image" 
-                      />
-                      <div className="bank-discount-sticker">
-                        <CreditCard size={14} />
-                        <span className="bank-tag-text">10% Instant Discount* On Credit Card EMI</span>
+                        <div className="orange-tiles-grid">
+                          {[
+                            { name: 'Watches', img: 'https://images.unsplash.com/photo-1524805444758-089113d48a6d?auto=format&fit=crop&w=300&q=80', deal: FEATURED_DEALS[0] },
+                            { name: 'Jackets', img: 'https://images.unsplash.com/photo-1551028719-00167b16eac5?auto=format&fit=crop&w=300&q=80', deal: { title: 'Windproof Thermal Winter Jacket', price: 499, category: 'Travel', image_url: 'https://images.unsplash.com/photo-1551028719-00167b16eac5?auto=format&fit=crop&w=600&q=80' } },
+                            { name: 'Cookware', img: 'https://images.unsplash.com/photo-1584990347449-397a6f235b2e?auto=format&fit=crop&w=300&q=80', deal: FEATURED_DEALS[9] },
+                            { name: 'Handbags', img: 'https://images.unsplash.com/photo-1584917865442-de89df76afd3?auto=format&fit=crop&w=300&q=80', deal: { title: 'Designer Vegan Leather Tote Bag', price: 489, category: 'Travel', image_url: 'https://images.unsplash.com/photo-1584917865442-de89df76afd3?auto=format&fit=crop&w=600&q=80' } },
+                            { name: 'Gadgets', img: 'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?auto=format&fit=crop&w=300&q=80', deal: FEATURED_DEALS[8] },
+                            { name: 'Lamps', img: 'https://images.unsplash.com/photo-1507473885765-e6ed057f782c?auto=format&fit=crop&w=300&q=80', deal: { title: 'Nordic Wooden Ambient Table Lamp', price: 399, category: 'Furniture', image_url: 'https://images.unsplash.com/photo-1507473885765-e6ed057f782c?auto=format&fit=crop&w=600&q=80' } },
+                            { name: 'Jerseys', img: 'https://images.unsplash.com/photo-1576566588028-4147f3842f27?auto=format&fit=crop&w=300&q=80', deal: { title: 'Breathable Dry-Fit Sports Jersey', price: 299, category: 'Travel', image_url: 'https://images.unsplash.com/photo-1576566588028-4147f3842f27?auto=format&fit=crop&w=600&q=80' } },
+                            { name: 'Skincare', img: 'https://images.unsplash.com/photo-1556228720-195a672e8a03?auto=format&fit=crop&w=300&q=80', deal: { title: 'Organic Vitamin C Radiant Face Serum', price: 349, category: 'Travel', image_url: 'https://images.unsplash.com/photo-1556228720-195a672e8a03?auto=format&fit=crop&w=600&q=80' } },
+                            { name: 'Essentials', img: 'https://images.unsplash.com/photo-1583394838336-acd977736f90?auto=format&fit=crop&w=300&q=80', deal: { title: 'Fast Charging Braided USB-C Cable (2m)', price: 199, category: 'Electronics', image_url: 'https://images.unsplash.com/photo-1583394838336-acd977736f90?auto=format&fit=crop&w=600&q=80' } }
+                          ].map((tile, i) => (
+                            <div key={i} className="orange-tile-item" onClick={() => openProductDetails(tile.deal)}>
+                              <img src={tile.img} alt={tile.name} className="orange-tile-img" />
+                              <div className="orange-tile-label">{tile.name}</div>
+                            </div>
+                          ))}
+                        </div>
                       </div>
+                      <span className="deal-card-footer-link" style={{ color: '#ffffff', cursor: 'pointer' }} onClick={() => openProductDetails(FEATURED_DEALS[0])}>
+                        See all offers ›
+                      </span>
                     </div>
-                  </div>
-                  <span className="deal-card-footer-link" style={{ cursor: 'pointer' }} onClick={() => openProductDetails(FEATURED_DEALS[1])}>
-                    See more
-                  </span>
-                </div>
 
-                {/* 3) 3 Months FREE Amazon Music Unlimited (Dark Card) */}
-                <div className="amazon-deal-card card-dark-feature">
-                  <div className="dark-feature-content">
-                    <div>
-                      <h3 className="deal-card-title">3 months FREE</h3>
-                      <p className="deal-card-subtitle" style={{ color: '#cccccc' }}>Unlimited music, ad-free</p>
-                      <div className="dark-feature-bg-graphic" onClick={() => openProductDetails(FEATURED_DEALS[6])}>
-                        <Headphones size={36} color="#00a8e1" />
+                    {/* 2) Pots & planters (Large Image Banner Card) */}
+                    <div className="amazon-deal-card">
+                      <div>
+                        <h3 className="deal-card-title">Up to 70% off | Pots & planters</h3>
+                        <p className="deal-card-subtitle">Give your plants a stylish home</p>
+                        <div className="card-large-image-wrap" onClick={() => openProductDetails(FEATURED_DEALS[1])}>
+                          <img
+                            src="https://images.unsplash.com/photo-1485955900006-10f4d324d411?auto=format&fit=crop&w=600&q=80"
+                            alt="Pots and Planters"
+                            className="card-large-image"
+                          />
+                          <div className="bank-discount-sticker">
+                            <CreditCard size={14} />
+                            <span className="bank-tag-text">10% Instant Discount* On Credit Card EMI</span>
+                          </div>
+                        </div>
                       </div>
+                      <span className="deal-card-footer-link" style={{ cursor: 'pointer' }} onClick={() => openProductDetails(FEATURED_DEALS[1])}>
+                        See more
+                      </span>
                     </div>
-                    <div>
-                      <div style={{ fontSize: '1.1rem', fontWeight: 800, marginBottom: '4px' }}>bigdeal music Unlimited</div>
-                      <span style={{ fontSize: '0.72rem', color: '#888888' }}>*Terms apply. Renews automatically.</span>
-                    </div>
-                  </div>
-                  <span className="deal-card-footer-link" style={{ color: '#00a8e1', cursor: 'pointer' }} onClick={() => openProductDetails(FEATURED_DEALS[6])}>
-                    Try now for free ›
-                  </span>
-                </div>
 
-                {/* 4) Under ₹499 Deals on Eye Makeup */}
-                <div className="amazon-deal-card">
-                  <div>
-                    <h3 className="deal-card-title">Under ₹499</h3>
-                    <p className="deal-card-subtitle">Deals on beauty & cosmetics</p>
-                    <div className="card-large-image-wrap" onClick={() => openProductDetails({ title: 'Luxury Eye Shadow & Velvet Lipstick Palette', price: 449, category: 'Travel', image_url: 'https://images.unsplash.com/photo-1522335789203-aabd1fc54bc9?auto=format&fit=crop&w=600&q=80', description: 'Long-lasting smudge-proof matte pigment colors for party and everyday styling.' })}>
-                      <img 
-                        src="https://images.unsplash.com/photo-1522335789203-aabd1fc54bc9?auto=format&fit=crop&w=600&q=80" 
-                        alt="Deals on Makeup" 
-                        className="card-large-image" 
-                      />
-                      <div className="bank-discount-sticker">
-                        <Tag size={14} />
-                        <span className="bank-tag-text">Unlimited 5%* cashback with ICICI Bank Card</span>
+                    {/* 3) 3 Months FREE Amazon Music Unlimited (Dark Card) */}
+                    <div className="amazon-deal-card card-dark-feature">
+                      <div className="dark-feature-content">
+                        <div>
+                          <h3 className="deal-card-title">3 months FREE</h3>
+                          <p className="deal-card-subtitle" style={{ color: '#cccccc' }}>Unlimited music, ad-free</p>
+                          <div className="dark-feature-bg-graphic" onClick={() => openProductDetails(FEATURED_DEALS[6])}>
+                            <Headphones size={36} color="#00a8e1" />
+                          </div>
+                        </div>
+                        <div>
+                          <div style={{ fontSize: '1.1rem', fontWeight: 800, marginBottom: '4px' }}>bigdeal music Unlimited</div>
+                          <span style={{ fontSize: '0.72rem', color: '#888888' }}>*Terms apply. Renews automatically.</span>
+                        </div>
                       </div>
+                      <span className="deal-card-footer-link" style={{ color: '#00a8e1', cursor: 'pointer' }} onClick={() => openProductDetails(FEATURED_DEALS[6])}>
+                        Try now for free ›
+                      </span>
                     </div>
+
+                    {/* 4) Under ₹499 Deals on Eye Makeup */}
+                    <div className="amazon-deal-card">
+                      <div>
+                        <h3 className="deal-card-title">Under ₹499</h3>
+                        <p className="deal-card-subtitle">Deals on beauty & cosmetics</p>
+                        <div className="card-large-image-wrap" onClick={() => openProductDetails({ title: 'Luxury Eye Shadow & Velvet Lipstick Palette', price: 449, category: 'Travel', image_url: 'https://images.unsplash.com/photo-1522335789203-aabd1fc54bc9?auto=format&fit=crop&w=600&q=80', description: 'Long-lasting smudge-proof matte pigment colors for party and everyday styling.' })}>
+                          <img
+                            src="https://images.unsplash.com/photo-1522335789203-aabd1fc54bc9?auto=format&fit=crop&w=600&q=80"
+                            alt="Deals on Makeup"
+                            className="card-large-image"
+                          />
+                          <div className="bank-discount-sticker">
+                            <Tag size={14} />
+                            <span className="bank-tag-text">Unlimited 5%* cashback with ICICI Bank Card</span>
+                          </div>
+                        </div>
+                      </div>
+                      <span className="deal-card-footer-link" style={{ cursor: 'pointer' }} onClick={() => openProductDetails({ title: 'Luxury Eye Shadow & Velvet Lipstick Palette', price: 449, category: 'Travel', image_url: 'https://images.unsplash.com/photo-1522335789203-aabd1fc54bc9?auto=format&fit=crop&w=600&q=80' })}>
+                        See all offers
+                      </span>
+                    </div>
+
+                    {/* 5) Shop popular deals (4-Grid with exact prices) */}
+                    <div className="amazon-deal-card">
+                      <div>
+                        <h3 className="deal-card-title">
+                          Shop popular deals
+                          <span className="chevron-link">›</span>
+                        </h3>
+                        <div className="deal-2x2-grid">
+                          <div className="deal-2x2-tile" onClick={() => openProductDetails(FEATURED_DEALS[2])}>
+                            <div className="tile-img-container">
+                              <img src={FEATURED_DEALS[2].image_url} alt="Vacuum" className="tile-img" />
+                            </div>
+                            <div className="tile-price-text">₹2,199.00</div>
+                            <span className="tile-discount-tag">Save 35%</span>
+                          </div>
+                          <div className="deal-2x2-tile" onClick={() => openProductDetails(FEATURED_DEALS[3])}>
+                            <div className="tile-img-container">
+                              <img src={FEATURED_DEALS[3].image_url} alt="Bedsheet" className="tile-img" />
+                            </div>
+                            <div className="tile-price-text">₹489.00</div>
+                            <span className="tile-discount-tag">Save 50%</span>
+                          </div>
+                          <div className="deal-2x2-tile" onClick={() => openProductDetails(FEATURED_DEALS[4])}>
+                            <div className="tile-img-container">
+                              <img src={FEATURED_DEALS[4].image_url} alt="Tool" className="tile-img" />
+                            </div>
+                            <div className="tile-price-text">₹1,489.00</div>
+                            <span className="tile-discount-tag">Save 28%</span>
+                          </div>
+                          <div className="deal-2x2-tile" onClick={() => openProductDetails(FEATURED_DEALS[5])}>
+                            <div className="tile-img-container">
+                              <img src={FEATURED_DEALS[5].image_url} alt="Shoes" className="tile-img" />
+                            </div>
+                            <div className="tile-price-text">₹3,389.00</div>
+                            <span className="tile-discount-tag">Save 40%</span>
+                          </div>
+                        </div>
+                      </div>
+                      <span className="deal-card-footer-link" style={{ cursor: 'pointer' }} onClick={() => openProductDetails(FEATURED_DEALS[2])}>
+                        Explore all deals
+                      </span>
+                    </div>
+
                   </div>
-                  <span className="deal-card-footer-link" style={{ cursor: 'pointer' }} onClick={() => openProductDetails({ title: 'Luxury Eye Shadow & Velvet Lipstick Palette', price: 449, category: 'Travel', image_url: 'https://images.unsplash.com/photo-1522335789203-aabd1fc54bc9?auto=format&fit=crop&w=600&q=80' })}>
-                    See all offers
-                  </span>
                 </div>
 
-                {/* 5) Shop popular deals (4-Grid with exact prices) */}
-                <div className="amazon-deal-card">
-                  <div>
-                    <h3 className="deal-card-title">
-                      Shop popular deals
-                      <span className="chevron-link">›</span>
+                {/* 4-COLUMN MULTI-GRID SECTIONS (MATCHING SCREENSHOT 2) */}
+                <div className="amazon-sections-stack">
+                  {/* Row 1 */}
+                  <div className="deal-quad-grid">
+
+                    {/* Quad 1: Buy office electronics */}
+                    <div className="amazon-deal-card">
+                      <div>
+                        <h3 className="deal-card-title">Buy office electronics at wholesale prices + 10% cashback</h3>
+                        <div className="deal-2x2-grid">
+                          <div className="deal-2x2-tile" onClick={() => openProductDetails({ title: 'ASUS 27-inch All-in-One Desktop PC (Core i7, 16GB)', price: 44999, category: 'Electronics', image_url: 'https://images.unsplash.com/photo-1593642632823-8f785ba67e45?auto=format&fit=crop&w=600&q=80' })}>
+                            <div className="tile-img-container">
+                              <img src="https://images.unsplash.com/photo-1593642632823-8f785ba67e45?auto=format&fit=crop&w=300&q=80" alt="Desktop" className="tile-img" />
+                            </div>
+                            <span className="tile-label-text">Up to 50% off on Desktops</span>
+                          </div>
+                          <div className="deal-2x2-tile" onClick={() => openProductDetails({ title: 'Ultra-Slim OLED Gaming Laptop (RTX 4060, 1TB SSD)', price: 68999, category: 'Electronics', image_url: 'https://images.unsplash.com/photo-1517336714731-489689fd1ca8?auto=format&fit=crop&w=600&q=80' })}>
+                            <div className="tile-img-container">
+                              <img src="https://images.unsplash.com/photo-1517336714731-489689fd1ca8?auto=format&fit=crop&w=300&q=80" alt="Laptop" className="tile-img" />
+                            </div>
+                            <span className="tile-label-text">Up to 40% off on Laptops</span>
+                          </div>
+                          <div className="deal-2x2-tile" onClick={() => openProductDetails({ title: 'All-in-One Wireless EcoTank Color Printer & Scanner', price: 11999, category: 'Electronics', image_url: 'https://images.unsplash.com/photo-1612815154858-60aa4c59eaa6?auto=format&fit=crop&w=600&q=80' })}>
+                            <div className="tile-img-container">
+                              <img src="https://images.unsplash.com/photo-1612815154858-60aa4c59eaa6?auto=format&fit=crop&w=300&q=80" alt="Printer" className="tile-img" />
+                            </div>
+                            <span className="tile-label-text">Up to 60% off on Printers</span>
+                          </div>
+                          <div className="deal-2x2-tile" onClick={() => openProductDetails(FEATURED_DEALS[0])}>
+                            <div className="tile-img-container" style={{ background: '#fff3e0' }}>
+                              <span style={{ fontSize: '2rem' }}>🏢</span>
+                            </div>
+                            <span className="tile-label-text">For Business purchases</span>
+                          </div>
+                        </div>
+                      </div>
+                      <span className="deal-card-footer-link" style={{ cursor: 'pointer' }} onClick={() => setSelectedCategory('Electronics')}>
+                        See all offers
+                      </span>
+                    </div>
+
+                    {/* Quad 2: Deals on Bluetooth speakers */}
+                    <div className="amazon-deal-card">
+                      <div>
+                        <h3 className="deal-card-title">Deals on Bluetooth speakers for your home</h3>
+                        <div className="deal-2x2-grid">
+                          <div className="deal-2x2-tile" onClick={() => openProductDetails(FEATURED_DEALS[6])}>
+                            <div className="tile-img-container">
+                              <img src={FEATURED_DEALS[6].image_url} alt="JBL Party" className="tile-img" />
+                            </div>
+                            <span className="tile-label-text">JBL Wireless Bluetooth...</span>
+                          </div>
+                          <div className="deal-2x2-tile" onClick={() => openProductDetails(FEATURED_DEALS[7])}>
+                            <div className="tile-img-container">
+                              <img src={FEATURED_DEALS[7].image_url} alt="Echo Dot" className="tile-img" />
+                            </div>
+                            <span className="tile-label-text">Echo Dot with Alexa</span>
+                          </div>
+                          <div className="deal-2x2-tile" onClick={() => openProductDetails({ title: 'ZEBRONICS Portable Wireless Boombox Speaker with Mic', price: 1799, category: 'Electronics', image_url: 'https://images.unsplash.com/photo-1608043152269-423dbba4e7e1?auto=format&fit=crop&w=600&q=80' })}>
+                            <div className="tile-img-container">
+                              <img src="https://images.unsplash.com/photo-1608043152269-423dbba4e7e1?auto=format&fit=crop&w=300&q=80" alt="Zebronics" className="tile-img" />
+                            </div>
+                            <span className="tile-label-text">ZEBRONICS Bluetooth...</span>
+                          </div>
+                          <div className="deal-2x2-tile" onClick={() => openProductDetails({ title: 'Echo Dot Max High-Fidelity Smart Speaker with Spatial Audio', price: 4999, category: 'Electronics', image_url: 'https://images.unsplash.com/photo-1543512214-318c7553f230?auto=format&fit=crop&w=600&q=80' })}>
+                            <div className="tile-img-container">
+                              <img src="https://images.unsplash.com/photo-1543512214-318c7553f230?auto=format&fit=crop&w=300&q=80" alt="Echo Max" className="tile-img" />
+                            </div>
+                            <span className="tile-label-text">Echo Dot Max with Alexa</span>
+                          </div>
+                        </div>
+                      </div>
+                      <span className="deal-card-footer-link" style={{ cursor: 'pointer' }} onClick={() => openProductDetails(FEATURED_DEALS[6])}>
+                        See all deals
+                      </span>
+                    </div>
+
+                    {/* Quad 3: Up to 75% off Earbuds */}
+                    <div className="amazon-deal-card">
+                      <div>
+                        <h3 className="deal-card-title">Up to 75% off | Most loved earbuds & audio</h3>
+                        <div className="deal-2x2-grid">
+                          <div className="deal-2x2-tile" onClick={() => openProductDetails(FEATURED_DEALS[8])}>
+                            <div className="tile-img-container">
+                              <img src={FEATURED_DEALS[8].image_url} alt="TWS" className="tile-img" />
+                            </div>
+                            <span className="tile-label-text">Truly wireless earbuds</span>
+                          </div>
+                          <div className="deal-2x2-tile" onClick={() => openProductDetails({ title: 'boAt Rockerz Bluetooth Neckband with Fast Charge (30 hrs)', price: 899, category: 'Electronics', image_url: 'https://images.unsplash.com/photo-1572536147248-ac59a8abfa4b?auto=format&fit=crop&w=600&q=80' })}>
+                            <div className="tile-img-container">
+                              <img src="https://images.unsplash.com/photo-1572536147248-ac59a8abfa4b?auto=format&fit=crop&w=300&q=80" alt="Neckband" className="tile-img" />
+                            </div>
+                            <span className="tile-label-text">Bluetooth Neckbands</span>
+                          </div>
+                          <div className="deal-2x2-tile" onClick={() => openProductDetails(products[0] || FEATURED_DEALS[8])}>
+                            <div className="tile-img-container">
+                              <img src="https://images.unsplash.com/photo-1505740420928-5e560c06d30e?auto=format&fit=crop&w=300&q=80" alt="Headphones" className="tile-img" />
+                            </div>
+                            <span className="tile-label-text">Over ear headphones</span>
+                          </div>
+                          <div className="deal-2x2-tile" onClick={() => openProductDetails({ title: 'Hi-Res In-Ear Wired Earphones with Mic & Tangle-Free Cable', price: 349, category: 'Electronics', image_url: 'https://images.unsplash.com/photo-1546435770-a3e426bf472b?auto=format&fit=crop&w=600&q=80' })}>
+                            <div className="tile-img-container">
+                              <img src="https://images.unsplash.com/photo-1546435770-a3e426bf472b?auto=format&fit=crop&w=300&q=80" alt="Wired" className="tile-img" />
+                            </div>
+                            <span className="tile-label-text">Wired earphones</span>
+                          </div>
+                        </div>
+                      </div>
+                      <span className="deal-card-footer-link" style={{ cursor: 'pointer' }} onClick={() => openProductDetails(FEATURED_DEALS[8])}>
+                        Explore all
+                      </span>
+                    </div>
+
+                    {/* Quad 4: Starting ₹299 Home essentials */}
+                    <div className="amazon-deal-card">
+                      <div>
+                        <h3 className="deal-card-title">Starting ₹299 | Home essentials</h3>
+                        <div className="deal-2x2-grid">
+                          <div className="deal-2x2-tile" onClick={() => openProductDetails(FEATURED_DEALS[9])}>
+                            <div className="tile-img-container">
+                              <img src={FEATURED_DEALS[9].image_url} alt="Kitchen" className="tile-img" />
+                            </div>
+                            <span className="tile-label-text">Starting ₹229 | Kitchen...</span>
+                          </div>
+                          <div className="deal-2x2-tile" onClick={() => openProductDetails({ title: 'Foldable Fabric Laundry Hamper & Toy Organizer', price: 299, category: 'Furniture', image_url: 'https://images.unsplash.com/photo-1544816155-12df9643f363?auto=format&fit=crop&w=600&q=80' })}>
+                            <div className="tile-img-container">
+                              <img src="https://images.unsplash.com/photo-1544816155-12df9643f363?auto=format&fit=crop&w=300&q=80" alt="Storage" className="tile-img" />
+                            </div>
+                            <span className="tile-label-text">Min. 50% off | Storage</span>
+                          </div>
+                          <div className="deal-2x2-tile" onClick={() => openProductDetails(FEATURED_DEALS[3])}>
+                            <div className="tile-img-container">
+                              <img src={FEATURED_DEALS[3].image_url} alt="Furnishing" className="tile-img" />
+                            </div>
+                            <span className="tile-label-text">Starting ₹299 | Furnishing</span>
+                          </div>
+                          <div className="deal-2x2-tile" onClick={() => openProductDetails(FEATURED_DEALS[1])}>
+                            <div className="tile-img-container">
+                              <img src="https://images.unsplash.com/photo-1513519245088-0e12902e5a38?auto=format&fit=crop&w=300&q=80" alt="Decor" className="tile-img" />
+                            </div>
+                            <span className="tile-label-text">Starting ₹129 | Decor</span>
+                          </div>
+                        </div>
+                      </div>
+                      <span className="deal-card-footer-link" style={{ cursor: 'pointer' }} onClick={() => openProductDetails(FEATURED_DEALS[9])}>
+                        See all
+                      </span>
+                    </div>
+
+                  </div>
+
+                  {/* Row 2 */}
+                  <div className="deal-quad-grid">
+
+                    <div className="amazon-deal-card">
+                      <div>
+                        <h3 className="deal-card-title">Starting ₹149 | Bestselling audio & accessories</h3>
+                        <div className="card-large-image-wrap" onClick={() => openProductDetails(products[0] || FEATURED_DEALS[8])}>
+                          <img src="https://images.unsplash.com/photo-1505740420928-5e560c06d30e?auto=format&fit=crop&w=600&q=80" alt="Audio" className="card-large-image" />
+                        </div>
+                      </div>
+                      <span className="deal-card-footer-link" style={{ cursor: 'pointer' }} onClick={() => openProductDetails(products[0] || FEATURED_DEALS[8])}>
+                        See all offers
+                      </span>
+                    </div>
+
+                    <div className="amazon-deal-card">
+                      <div>
+                        <h3 className="deal-card-title">Up to 60% off | Bestselling stationery & supplies</h3>
+                        <div className="card-large-image-wrap" onClick={() => openProductDetails({ title: 'Premium Hardcover Ruled Journal & Rollerball Pen Set', price: 299, category: 'Furniture', image_url: 'https://images.unsplash.com/photo-1583485088034-697b5bc54ccd?auto=format&fit=crop&w=600&q=80' })}>
+                          <img src="https://images.unsplash.com/photo-1583485088034-697b5bc54ccd?auto=format&fit=crop&w=600&q=80" alt="Stationery" className="card-large-image" />
+                        </div>
+                      </div>
+                      <span className="deal-card-footer-link" style={{ cursor: 'pointer' }} onClick={() => openProductDetails({ title: 'Premium Hardcover Ruled Journal & Rollerball Pen Set', price: 299, category: 'Furniture', image_url: 'https://images.unsplash.com/photo-1583485088034-697b5bc54ccd?auto=format&fit=crop&w=600&q=80' })}>
+                        See more
+                      </span>
+                    </div>
+
+                    <div className="amazon-deal-card">
+                      <div>
+                        <h3 className="deal-card-title">Up to 60% off | Bestselling Printers & routers</h3>
+                        <div className="card-large-image-wrap" onClick={() => openProductDetails({ title: 'Dual-Band Wi-Fi 6 Gigabit Router (3000 Mbps High Speed)', price: 2499, category: 'Electronics', image_url: 'https://images.unsplash.com/photo-1612815154858-60aa4c59eaa6?auto=format&fit=crop&w=600&q=80' })}>
+                          <img src="https://images.unsplash.com/photo-1612815154858-60aa4c59eaa6?auto=format&fit=crop&w=600&q=80" alt="Printers" className="card-large-image" />
+                        </div>
+                      </div>
+                      <span className="deal-card-footer-link" style={{ cursor: 'pointer' }} onClick={() => openProductDetails({ title: 'Dual-Band Wi-Fi 6 Gigabit Router (3000 Mbps High Speed)', price: 2499, category: 'Electronics', image_url: 'https://images.unsplash.com/photo-1612815154858-60aa4c59eaa6?auto=format&fit=crop&w=600&q=80' })}>
+                        Explore offers
+                      </span>
+                    </div>
+
+                    <div className="amazon-deal-card">
+                      <div>
+                        <h3 className="deal-card-title">Premium accessories from top brands</h3>
+                        <div className="card-large-image-wrap" onClick={() => openProductDetails(FEATURED_DEALS[0])}>
+                          <img src="https://images.unsplash.com/photo-1522335789203-aabd1fc54bc9?auto=format&fit=crop&w=600&q=80" alt="Accessories" className="card-large-image" />
+                        </div>
+                      </div>
+                      <span className="deal-card-footer-link" style={{ cursor: 'pointer' }} onClick={() => openProductDetails(FEATURED_DEALS[0])}>
+                        Shop now
+                      </span>
+                    </div>
+
+                  </div>
+                </div>
+
+                {/* HORIZONTAL TODAY'S DEALS PRODUCT CAROUSEL RAIL */}
+                <section className="amazon-rail-section" id="todays-deals-rail">
+                  <div className="rail-header-row">
+                    <h3 className="rail-title">
+                      <span>Today's Deals</span>
+                      <span style={{ fontSize: '0.88rem', fontWeight: 500, color: '#565959' }}>Limited time offers on top rated products</span>
                     </h3>
-                    <div className="deal-2x2-grid">
-                      <div className="deal-2x2-tile" onClick={() => openProductDetails(FEATURED_DEALS[2])}>
-                        <div className="tile-img-container">
-                          <img src={FEATURED_DEALS[2].image_url} alt="Vacuum" className="tile-img" />
-                        </div>
-                        <div className="tile-price-text">₹2,199.00</div>
-                        <span className="tile-discount-tag">Save 35%</span>
-                      </div>
-                      <div className="deal-2x2-tile" onClick={() => openProductDetails(FEATURED_DEALS[3])}>
-                        <div className="tile-img-container">
-                          <img src={FEATURED_DEALS[3].image_url} alt="Bedsheet" className="tile-img" />
-                        </div>
-                        <div className="tile-price-text">₹489.00</div>
-                        <span className="tile-discount-tag">Save 50%</span>
-                      </div>
-                      <div className="deal-2x2-tile" onClick={() => openProductDetails(FEATURED_DEALS[4])}>
-                        <div className="tile-img-container">
-                          <img src={FEATURED_DEALS[4].image_url} alt="Tool" className="tile-img" />
-                        </div>
-                        <div className="tile-price-text">₹1,489.00</div>
-                        <span className="tile-discount-tag">Save 28%</span>
-                      </div>
-                      <div className="deal-2x2-tile" onClick={() => openProductDetails(FEATURED_DEALS[5])}>
-                        <div className="tile-img-container">
-                          <img src={FEATURED_DEALS[5].image_url} alt="Shoes" className="tile-img" />
-                        </div>
-                        <div className="tile-price-text">₹3,389.00</div>
-                        <span className="tile-discount-tag">Save 40%</span>
-                      </div>
-                    </div>
+                    <span className="deal-card-footer-link" style={{ cursor: 'pointer' }} onClick={() => {
+                      const target = document.getElementById('catalog-results-target');
+                      target?.scrollIntoView({ behavior: 'smooth' });
+                    }}>
+                      See all deals
+                    </span>
                   </div>
-                  <span className="deal-card-footer-link" style={{ cursor: 'pointer' }} onClick={() => openProductDetails(FEATURED_DEALS[2])}>
-                    Explore all deals
-                  </span>
-                </div>
 
-              </div>
-            </div>
-
-            {/* 4-COLUMN MULTI-GRID SECTIONS (MATCHING SCREENSHOT 2) */}
-            <div className="amazon-sections-stack">
-              {/* Row 1 */}
-              <div className="deal-quad-grid">
-                
-                {/* Quad 1: Buy office electronics */}
-                <div className="amazon-deal-card">
-                  <div>
-                    <h3 className="deal-card-title">Buy office electronics at wholesale prices + 10% cashback</h3>
-                    <div className="deal-2x2-grid">
-                      <div className="deal-2x2-tile" onClick={() => openProductDetails({ title: 'ASUS 27-inch All-in-One Desktop PC (Core i7, 16GB)', price: 44999, category: 'Electronics', image_url: 'https://images.unsplash.com/photo-1593642632823-8f785ba67e45?auto=format&fit=crop&w=600&q=80' })}>
-                        <div className="tile-img-container">
-                          <img src="https://images.unsplash.com/photo-1593642632823-8f785ba67e45?auto=format&fit=crop&w=300&q=80" alt="Desktop" className="tile-img" />
+                  <div className="rail-scroll-container">
+                    {products.map((p) => (
+                      <div key={p.id} className="rail-product-card" onClick={() => openProductDetails(p)}>
+                        <div className="rail-img-wrap">
+                          <img src={p.image_url} alt={p.title} className="rail-img" onError={(e) => handleImageError(e, p.title, p.category, p.image_url)} />
                         </div>
-                        <span className="tile-label-text">Up to 50% off on Desktops</span>
-                      </div>
-                      <div className="deal-2x2-tile" onClick={() => openProductDetails({ title: 'Ultra-Slim OLED Gaming Laptop (RTX 4060, 1TB SSD)', price: 68999, category: 'Electronics', image_url: 'https://images.unsplash.com/photo-1517336714731-489689fd1ca8?auto=format&fit=crop&w=600&q=80' })}>
-                        <div className="tile-img-container">
-                          <img src="https://images.unsplash.com/photo-1517336714731-489689fd1ca8?auto=format&fit=crop&w=300&q=80" alt="Laptop" className="tile-img" />
+                        <div>
+                          <span className="deal-pill-tag">Up to 40% off</span>
+                          <span className="deal-pill-limited">Deal of the Day</span>
                         </div>
-                        <span className="tile-label-text">Up to 40% off on Laptops</span>
-                      </div>
-                      <div className="deal-2x2-tile" onClick={() => openProductDetails({ title: 'All-in-One Wireless EcoTank Color Printer & Scanner', price: 11999, category: 'Electronics', image_url: 'https://images.unsplash.com/photo-1612815154858-60aa4c59eaa6?auto=format&fit=crop&w=600&q=80' })}>
-                        <div className="tile-img-container">
-                          <img src="https://images.unsplash.com/photo-1612815154858-60aa4c59eaa6?auto=format&fit=crop&w=300&q=80" alt="Printer" className="tile-img" />
+                        <div className="rail-price-row">
+                          <span className="rail-deal-price">{formatCurrency(p.price)}</span>
+                          <span className="rail-orig-price">{formatCurrency(p.price * 1.4)}</span>
                         </div>
-                        <span className="tile-label-text">Up to 60% off on Printers</span>
+                        <p className="rail-product-title">{p.title}</p>
                       </div>
-                      <div className="deal-2x2-tile" onClick={() => openProductDetails(FEATURED_DEALS[0])}>
-                        <div className="tile-img-container" style={{ background: '#fff3e0' }}>
-                          <span style={{ fontSize: '2rem' }}>🏢</span>
-                        </div>
-                        <span className="tile-label-text">For Business purchases</span>
-                      </div>
-                    </div>
+                    ))}
                   </div>
-                  <span className="deal-card-footer-link" style={{ cursor: 'pointer' }} onClick={() => setSelectedCategory('Electronics')}>
-                    See all offers
-                  </span>
-                </div>
-
-                {/* Quad 2: Deals on Bluetooth speakers */}
-                <div className="amazon-deal-card">
-                  <div>
-                    <h3 className="deal-card-title">Deals on Bluetooth speakers for your home</h3>
-                    <div className="deal-2x2-grid">
-                      <div className="deal-2x2-tile" onClick={() => openProductDetails(FEATURED_DEALS[6])}>
-                        <div className="tile-img-container">
-                          <img src={FEATURED_DEALS[6].image_url} alt="JBL Party" className="tile-img" />
-                        </div>
-                        <span className="tile-label-text">JBL Wireless Bluetooth...</span>
-                      </div>
-                      <div className="deal-2x2-tile" onClick={() => openProductDetails(FEATURED_DEALS[7])}>
-                        <div className="tile-img-container">
-                          <img src={FEATURED_DEALS[7].image_url} alt="Echo Dot" className="tile-img" />
-                        </div>
-                        <span className="tile-label-text">Echo Dot with Alexa</span>
-                      </div>
-                      <div className="deal-2x2-tile" onClick={() => openProductDetails({ title: 'ZEBRONICS Portable Wireless Boombox Speaker with Mic', price: 1799, category: 'Electronics', image_url: 'https://images.unsplash.com/photo-1608043152269-423dbba4e7e1?auto=format&fit=crop&w=600&q=80' })}>
-                        <div className="tile-img-container">
-                          <img src="https://images.unsplash.com/photo-1608043152269-423dbba4e7e1?auto=format&fit=crop&w=300&q=80" alt="Zebronics" className="tile-img" />
-                        </div>
-                        <span className="tile-label-text">ZEBRONICS Bluetooth...</span>
-                      </div>
-                      <div className="deal-2x2-tile" onClick={() => openProductDetails({ title: 'Echo Dot Max High-Fidelity Smart Speaker with Spatial Audio', price: 4999, category: 'Electronics', image_url: 'https://images.unsplash.com/photo-1543512214-318c7553f230?auto=format&fit=crop&w=600&q=80' })}>
-                        <div className="tile-img-container">
-                          <img src="https://images.unsplash.com/photo-1543512214-318c7553f230?auto=format&fit=crop&w=300&q=80" alt="Echo Max" className="tile-img" />
-                        </div>
-                        <span className="tile-label-text">Echo Dot Max with Alexa</span>
-                      </div>
-                    </div>
-                  </div>
-                  <span className="deal-card-footer-link" style={{ cursor: 'pointer' }} onClick={() => openProductDetails(FEATURED_DEALS[6])}>
-                    See all deals
-                  </span>
-                </div>
-
-                {/* Quad 3: Up to 75% off Earbuds */}
-                <div className="amazon-deal-card">
-                  <div>
-                    <h3 className="deal-card-title">Up to 75% off | Most loved earbuds & audio</h3>
-                    <div className="deal-2x2-grid">
-                      <div className="deal-2x2-tile" onClick={() => openProductDetails(FEATURED_DEALS[8])}>
-                        <div className="tile-img-container">
-                          <img src={FEATURED_DEALS[8].image_url} alt="TWS" className="tile-img" />
-                        </div>
-                        <span className="tile-label-text">Truly wireless earbuds</span>
-                      </div>
-                      <div className="deal-2x2-tile" onClick={() => openProductDetails({ title: 'boAt Rockerz Bluetooth Neckband with Fast Charge (30 hrs)', price: 899, category: 'Electronics', image_url: 'https://images.unsplash.com/photo-1572536147248-ac59a8abfa4b?auto=format&fit=crop&w=600&q=80' })}>
-                        <div className="tile-img-container">
-                          <img src="https://images.unsplash.com/photo-1572536147248-ac59a8abfa4b?auto=format&fit=crop&w=300&q=80" alt="Neckband" className="tile-img" />
-                        </div>
-                        <span className="tile-label-text">Bluetooth Neckbands</span>
-                      </div>
-                      <div className="deal-2x2-tile" onClick={() => openProductDetails(products[0] || FEATURED_DEALS[8])}>
-                        <div className="tile-img-container">
-                          <img src="https://images.unsplash.com/photo-1505740420928-5e560c06d30e?auto=format&fit=crop&w=300&q=80" alt="Headphones" className="tile-img" />
-                        </div>
-                        <span className="tile-label-text">Over ear headphones</span>
-                      </div>
-                      <div className="deal-2x2-tile" onClick={() => openProductDetails({ title: 'Hi-Res In-Ear Wired Earphones with Mic & Tangle-Free Cable', price: 349, category: 'Electronics', image_url: 'https://images.unsplash.com/photo-1546435770-a3e426bf472b?auto=format&fit=crop&w=600&q=80' })}>
-                        <div className="tile-img-container">
-                          <img src="https://images.unsplash.com/photo-1546435770-a3e426bf472b?auto=format&fit=crop&w=300&q=80" alt="Wired" className="tile-img" />
-                        </div>
-                        <span className="tile-label-text">Wired earphones</span>
-                      </div>
-                    </div>
-                  </div>
-                  <span className="deal-card-footer-link" style={{ cursor: 'pointer' }} onClick={() => openProductDetails(FEATURED_DEALS[8])}>
-                    Explore all
-                  </span>
-                </div>
-
-                {/* Quad 4: Starting ₹299 Home essentials */}
-                <div className="amazon-deal-card">
-                  <div>
-                    <h3 className="deal-card-title">Starting ₹299 | Home essentials</h3>
-                    <div className="deal-2x2-grid">
-                      <div className="deal-2x2-tile" onClick={() => openProductDetails(FEATURED_DEALS[9])}>
-                        <div className="tile-img-container">
-                          <img src={FEATURED_DEALS[9].image_url} alt="Kitchen" className="tile-img" />
-                        </div>
-                        <span className="tile-label-text">Starting ₹229 | Kitchen...</span>
-                      </div>
-                      <div className="deal-2x2-tile" onClick={() => openProductDetails({ title: 'Foldable Fabric Laundry Hamper & Toy Organizer', price: 299, category: 'Furniture', image_url: 'https://images.unsplash.com/photo-1544816155-12df9643f363?auto=format&fit=crop&w=600&q=80' })}>
-                        <div className="tile-img-container">
-                          <img src="https://images.unsplash.com/photo-1544816155-12df9643f363?auto=format&fit=crop&w=300&q=80" alt="Storage" className="tile-img" />
-                        </div>
-                        <span className="tile-label-text">Min. 50% off | Storage</span>
-                      </div>
-                      <div className="deal-2x2-tile" onClick={() => openProductDetails(FEATURED_DEALS[3])}>
-                        <div className="tile-img-container">
-                          <img src={FEATURED_DEALS[3].image_url} alt="Furnishing" className="tile-img" />
-                        </div>
-                        <span className="tile-label-text">Starting ₹299 | Furnishing</span>
-                      </div>
-                      <div className="deal-2x2-tile" onClick={() => openProductDetails(FEATURED_DEALS[1])}>
-                        <div className="tile-img-container">
-                          <img src="https://images.unsplash.com/photo-1513519245088-0e12902e5a38?auto=format&fit=crop&w=300&q=80" alt="Decor" className="tile-img" />
-                        </div>
-                        <span className="tile-label-text">Starting ₹129 | Decor</span>
-                      </div>
-                    </div>
-                  </div>
-                  <span className="deal-card-footer-link" style={{ cursor: 'pointer' }} onClick={() => openProductDetails(FEATURED_DEALS[9])}>
-                    See all
-                  </span>
-                </div>
-
-              </div>
-
-              {/* Row 2 */}
-              <div className="deal-quad-grid">
-                
-                <div className="amazon-deal-card">
-                  <div>
-                    <h3 className="deal-card-title">Starting ₹149 | Bestselling audio & accessories</h3>
-                    <div className="card-large-image-wrap" onClick={() => openProductDetails(products[0] || FEATURED_DEALS[8])}>
-                      <img src="https://images.unsplash.com/photo-1505740420928-5e560c06d30e?auto=format&fit=crop&w=600&q=80" alt="Audio" className="card-large-image" />
-                    </div>
-                  </div>
-                  <span className="deal-card-footer-link" style={{ cursor: 'pointer' }} onClick={() => openProductDetails(products[0] || FEATURED_DEALS[8])}>
-                    See all offers
-                  </span>
-                </div>
-
-                <div className="amazon-deal-card">
-                  <div>
-                    <h3 className="deal-card-title">Up to 60% off | Bestselling stationery & supplies</h3>
-                    <div className="card-large-image-wrap" onClick={() => openProductDetails({ title: 'Premium Hardcover Ruled Journal & Rollerball Pen Set', price: 299, category: 'Furniture', image_url: 'https://images.unsplash.com/photo-1583485088034-697b5bc54ccd?auto=format&fit=crop&w=600&q=80' })}>
-                      <img src="https://images.unsplash.com/photo-1583485088034-697b5bc54ccd?auto=format&fit=crop&w=600&q=80" alt="Stationery" className="card-large-image" />
-                    </div>
-                  </div>
-                  <span className="deal-card-footer-link" style={{ cursor: 'pointer' }} onClick={() => openProductDetails({ title: 'Premium Hardcover Ruled Journal & Rollerball Pen Set', price: 299, category: 'Furniture', image_url: 'https://images.unsplash.com/photo-1583485088034-697b5bc54ccd?auto=format&fit=crop&w=600&q=80' })}>
-                    See more
-                  </span>
-                </div>
-
-                <div className="amazon-deal-card">
-                  <div>
-                    <h3 className="deal-card-title">Up to 60% off | Bestselling Printers & routers</h3>
-                    <div className="card-large-image-wrap" onClick={() => openProductDetails({ title: 'Dual-Band Wi-Fi 6 Gigabit Router (3000 Mbps High Speed)', price: 2499, category: 'Electronics', image_url: 'https://images.unsplash.com/photo-1612815154858-60aa4c59eaa6?auto=format&fit=crop&w=600&q=80' })}>
-                      <img src="https://images.unsplash.com/photo-1612815154858-60aa4c59eaa6?auto=format&fit=crop&w=600&q=80" alt="Printers" className="card-large-image" />
-                    </div>
-                  </div>
-                  <span className="deal-card-footer-link" style={{ cursor: 'pointer' }} onClick={() => openProductDetails({ title: 'Dual-Band Wi-Fi 6 Gigabit Router (3000 Mbps High Speed)', price: 2499, category: 'Electronics', image_url: 'https://images.unsplash.com/photo-1612815154858-60aa4c59eaa6?auto=format&fit=crop&w=600&q=80' })}>
-                    Explore offers
-                  </span>
-                </div>
-
-                <div className="amazon-deal-card">
-                  <div>
-                    <h3 className="deal-card-title">Premium accessories from top brands</h3>
-                    <div className="card-large-image-wrap" onClick={() => openProductDetails(FEATURED_DEALS[0])}>
-                      <img src="https://images.unsplash.com/photo-1522335789203-aabd1fc54bc9?auto=format&fit=crop&w=600&q=80" alt="Accessories" className="card-large-image" />
-                    </div>
-                  </div>
-                  <span className="deal-card-footer-link" style={{ cursor: 'pointer' }} onClick={() => openProductDetails(FEATURED_DEALS[0])}>
-                    Shop now
-                  </span>
-                </div>
-
-              </div>
-            </div>
-
-            {/* HORIZONTAL TODAY'S DEALS PRODUCT CAROUSEL RAIL */}
-            <section className="amazon-rail-section" id="todays-deals-rail">
-              <div className="rail-header-row">
-                <h3 className="rail-title">
-                  <span>Today's Deals</span>
-                  <span style={{ fontSize: '0.88rem', fontWeight: 500, color: '#565959' }}>Limited time offers on top rated products</span>
-                </h3>
-                <span className="deal-card-footer-link" style={{ cursor: 'pointer' }} onClick={() => {
-                  const target = document.getElementById('catalog-results-target');
-                  target?.scrollIntoView({ behavior: 'smooth' });
-                }}>
-                  See all deals
-                </span>
-              </div>
-
-              <div className="rail-scroll-container">
-                {products.map((p) => (
-                  <div key={p.id} className="rail-product-card" onClick={() => openProductDetails(p)}>
-                    <div className="rail-img-wrap">
-                      <img src={p.image_url} alt={p.title} className="rail-img" onError={(e) => handleImageError(e, p.title, p.category, p.image_url)} />
-                    </div>
-                    <div>
-                      <span className="deal-pill-tag">Up to 40% off</span>
-                      <span className="deal-pill-limited">Deal of the Day</span>
-                    </div>
-                    <div className="rail-price-row">
-                      <span className="rail-deal-price">{formatCurrency(p.price)}</span>
-                      <span className="rail-orig-price">{formatCurrency(p.price * 1.4)}</span>
-                    </div>
-                    <p className="rail-product-title">{p.title}</p>
-                  </div>
-                ))}
-              </div>
-            </section>
-            </>
+                </section>
+              </>
             )}
 
             {/* MAIN CATALOG WITH AMAZON FILTER SIDEBAR & PRODUCT LISTINGS */}
             <div className="catalog-page-layout" id="catalog-results-target">
-              
+
               {/* Left Amazon Filter Sidebar */}
               <aside className="amazon-filter-sidebar">
                 <div className="filter-block">
@@ -3100,8 +3130,8 @@ function App() {
                 <div className="filter-block">
                   <h4 className="filter-block-title">Big Deal Prime</h4>
                   <label className="filter-checkbox-label">
-                    <input 
-                      type="checkbox" 
+                    <input
+                      type="checkbox"
                       checked={primeOnly}
                       onChange={(e) => setPrimeOnly(e.target.checked)}
                     />
@@ -3114,14 +3144,14 @@ function App() {
                 <div className="filter-block">
                   <h4 className="filter-block-title">Category</h4>
                   <div className="filter-options-list">
-                    <div 
+                    <div
                       className={`rating-filter-link ${!selectedCategory ? 'font-bold' : ''}`}
                       onClick={() => setSelectedCategory('')}
                     >
                       All Categories ({products.length})
                     </div>
                     {categories.map((c) => (
-                      <div 
+                      <div
                         key={c}
                         className={`rating-filter-link ${selectedCategory === c ? 'font-bold text-orange' : ''}`}
                         onClick={() => setSelectedCategory(c)}
@@ -3136,7 +3166,7 @@ function App() {
                   <h4 className="filter-block-title">Avg. Customer Review</h4>
                   <div className="filter-options-list">
                     {[4, 3, 2].map((r) => (
-                      <div 
+                      <div
                         key={r}
                         className="rating-filter-link"
                         onClick={() => setMinRatingFilter(minRatingFilter === r ? 0 : r)}
@@ -3158,17 +3188,17 @@ function App() {
                     <div className="rating-filter-link" onClick={() => { setMinPrice(5000); setMaxPrice(100000); }}>Over ₹5,000</div>
                   </div>
                   <div className="price-range-inputs">
-                    <input 
-                      type="number" 
-                      placeholder="₹ Min" 
+                    <input
+                      type="number"
+                      placeholder="₹ Min"
                       className="price-box-input"
                       value={minPrice || ''}
                       onChange={(e) => setMinPrice(Number(e.target.value))}
                     />
                     <span>-</span>
-                    <input 
-                      type="number" 
-                      placeholder="₹ Max" 
+                    <input
+                      type="number"
+                      placeholder="₹ Max"
                       className="price-box-input"
                       value={maxPrice || ''}
                       onChange={(e) => setMaxPrice(Number(e.target.value))}
@@ -3180,8 +3210,8 @@ function App() {
                 <div className="filter-block">
                   <h4 className="filter-block-title">Availability</h4>
                   <label className="filter-checkbox-label">
-                    <input 
-                      type="checkbox" 
+                    <input
+                      type="checkbox"
                       checked={inStockOnly}
                       onChange={(e) => setInStockOnly(e.target.checked)}
                     />
@@ -3221,7 +3251,7 @@ function App() {
 
                   <div className="sort-dropdown-wrap">
                     <span style={{ fontSize: '0.85rem', color: '#565959' }}>Sort by:</span>
-                    <select 
+                    <select
                       className="sort-select-amazon"
                       value={sortBy}
                       onChange={(e) => setSortBy(e.target.value)}
@@ -3247,9 +3277,9 @@ function App() {
                     </p>
                     <div className="no-results-chips-wrap">
                       {['Watch', 'Headphones', 'Planter', 'Vacuum', 'Shoes', 'Speaker', 'Earbuds', 'Cookware', 'Jacket', 'Lamp', 'Serum'].map((chip) => (
-                        <button 
-                          key={chip} 
-                          type="button" 
+                        <button
+                          key={chip}
+                          type="button"
                           className="no-results-chip"
                           onClick={() => {
                             setSearchQuery(chip);
@@ -3261,9 +3291,9 @@ function App() {
                         </button>
                       ))}
                     </div>
-                    <button 
-                      type="button" 
-                      className="amazon-yellow-btn" 
+                    <button
+                      type="button"
+                      className="amazon-yellow-btn"
                       style={{ maxWidth: '240px', margin: '0 auto' }}
                       onClick={() => {
                         setSearchQuery('');
@@ -3278,125 +3308,125 @@ function App() {
                 ) : (
                   /* Amazon Product Listing Cards Grid */
                   <div className="amazon-product-grid">
-                  {sortedProducts.map((product, idx) => {
-                    const isWish = wishlist.some(w => w.id === product.id);
-                    const isTop = (product.average_rating || 0) >= 4.5 || idx === 0;
+                    {sortedProducts.map((product, idx) => {
+                      const isWish = wishlist.some(w => w.id === product.id);
+                      const isTop = (product.average_rating || 0) >= 4.5 || idx === 0;
 
-                    return (
-                      <article 
-                        key={product.id} 
-                        className="amazon-listing-card"
-                        onClick={() => openProductDetails(product)}
-                      >
-                        {/* Amazon Badge */}
-                        <div className="listing-badge-container">
-                          {isTop ? (
-                            <div className="badge-bestseller">#1 Best Seller</div>
-                          ) : idx % 2 === 0 ? (
-                            <div className="badge-amazon-choice">BigDeal's <span>Choice</span></div>
-                          ) : null}
-                        </div>
-
-                        {/* Wishlist Heart */}
-                        <button 
-                          type="button" 
-                          className={`listing-heart-btn ${isWish ? 'active' : ''}`}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            toggleWishlist(product);
-                          }}
-                          title="Save to Wish List"
+                      return (
+                        <article
+                          key={product.id}
+                          className="amazon-listing-card"
+                          onClick={() => openProductDetails(product)}
                         >
-                          <Heart 
-                            size={16} 
-                            fill={isWish ? "#e11d48" : "transparent"} 
-                            color={isWish ? "#e11d48" : "#565959"} 
-                            strokeWidth={isWish ? 0 : 2} 
-                          />
-                        </button>
-
-                        {/* Product Image */}
-                        <div className="listing-img-frame">
-                          <img 
-                            src={product.image_url} 
-                            alt={product.title} 
-                            className="listing-img" 
-                            loading="lazy" 
-                            onError={(e) => handleImageError(e, product.title, product.category, product.image_url)}
-                          />
-                          <div className="listing-quick-view-bar">
-                            <span className="listing-quick-view-btn">
-                              <Eye size={13} /> Quick Preview
-                            </span>
-                          </div>
-                        </div>
-
-                        {/* Title & Ratings */}
-                        <div>
-                          <h4 className="listing-title">{product.title}</h4>
-                          <div className="listing-rating-row">
-                            {renderStars(product.average_rating || 4.5)}
-                            <span className="listing-review-count">({product.reviews_count || 128})</span>
-                          </div>
-                          <div className="listing-bought-sub">500+ bought in past month</div>
-
-                          {/* Stock Scarcity Alert */}
-                          {(product.stock || 10) <= 5 && (
-                            <div className="listing-scarcity-alert">
-                              <Flame size={12} color="#b91c1c" />
-                              <span>Only {(product.stock || 10)} left in stock - order soon</span>
-                            </div>
-                          )}
-
-                          {/* Price Display */}
-                          <div className="listing-price-block">
-                            <div className="listing-price-main">
-                              <span className="listing-price-symbol">₹</span>
-                              <span>{formatCurrency(product.price).replace(/[^0-9,]/g, '')}</span>
-                              <span className="listing-price-fraction">00</span>
-                            </div>
-                            <span className="listing-mrp-strike">{formatCurrency(product.price * 1.35)}</span>
-                            <span className="listing-discount-pct">(35% off)</span>
+                          {/* Amazon Badge */}
+                          <div className="listing-badge-container">
+                            {isTop ? (
+                              <div className="badge-bestseller">#1 Best Seller</div>
+                            ) : idx % 2 === 0 ? (
+                              <div className="badge-amazon-choice">BigDeal's <span>Choice</span></div>
+                            ) : null}
                           </div>
 
-                          {/* Prime & Delivery */}
-                          <div className="listing-delivery-tag">
-                            <span className="prime-check">
-                              <Check size={11} strokeWidth={3.5} style={{ marginRight: 2 }} />prime
-                            </span>
-                            <span>FREE Delivery by <strong>Tomorrow</strong></span>
-                          </div>
-                        </div>
-
-                        {/* Action Buttons: Add to Cart & Compare */}
-                        <div style={{ display: 'flex', gap: '6px', width: '100%', marginTop: '0.4rem' }}>
-                          <button 
-                            type="button" 
-                            className="amazon-yellow-btn"
-                            style={{ flex: 1 }}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              addToCart(product);
-                            }}
-                            disabled={product.stock === 0}
-                          >
-                            {product.stock === 0 ? 'Out of Stock' : 'Add to Cart'}
-                          </button>
+                          {/* Wishlist Heart */}
                           <button
                             type="button"
-                            className={`compare-toggle-btn ${comparedProducts.some((p) => p.id === product.id) ? 'active' : ''}`}
+                            className={`listing-heart-btn ${isWish ? 'active' : ''}`}
                             onClick={(e) => {
                               e.stopPropagation();
-                              toggleCompareProduct(product);
+                              toggleWishlist(product);
                             }}
-                            title={comparedProducts.some((p) => p.id === product.id) ? "Remove from comparison" : "Compare specs"}
+                            title="Save to Wish List"
                           >
-                            <Scale size={14} />
+                            <Heart
+                              size={16}
+                              fill={isWish ? "#e11d48" : "transparent"}
+                              color={isWish ? "#e11d48" : "#565959"}
+                              strokeWidth={isWish ? 0 : 2}
+                            />
                           </button>
-                        </div>
-                      </article>
-                    );
-                  })}
+
+                          {/* Product Image */}
+                          <div className="listing-img-frame">
+                            <img
+                              src={product.image_url}
+                              alt={product.title}
+                              className="listing-img"
+                              loading="lazy"
+                              onError={(e) => handleImageError(e, product.title, product.category, product.image_url)}
+                            />
+                            <div className="listing-quick-view-bar">
+                              <span className="listing-quick-view-btn">
+                                <Eye size={13} /> Quick Preview
+                              </span>
+                            </div>
+                          </div>
+
+                          {/* Title & Ratings */}
+                          <div>
+                            <h4 className="listing-title">{product.title}</h4>
+                            <div className="listing-rating-row">
+                              {renderStars(product.average_rating || 4.5)}
+                              <span className="listing-review-count">({product.reviews_count || 128})</span>
+                            </div>
+                            <div className="listing-bought-sub">500+ bought in past month</div>
+
+                            {/* Stock Scarcity Alert */}
+                            {(product.stock || 10) <= 5 && (
+                              <div className="listing-scarcity-alert">
+                                <Flame size={12} color="#b91c1c" />
+                                <span>Only {(product.stock || 10)} left in stock - order soon</span>
+                              </div>
+                            )}
+
+                            {/* Price Display */}
+                            <div className="listing-price-block">
+                              <div className="listing-price-main">
+                                <span className="listing-price-symbol">₹</span>
+                                <span>{formatCurrency(product.price).replace(/[^0-9,]/g, '')}</span>
+                                <span className="listing-price-fraction">00</span>
+                              </div>
+                              <span className="listing-mrp-strike">{formatCurrency(product.price * 1.35)}</span>
+                              <span className="listing-discount-pct">(35% off)</span>
+                            </div>
+
+                            {/* Prime & Delivery */}
+                            <div className="listing-delivery-tag">
+                              <span className="prime-check">
+                                <Check size={11} strokeWidth={3.5} style={{ marginRight: 2 }} />prime
+                              </span>
+                              <span>FREE Delivery by <strong>Tomorrow</strong></span>
+                            </div>
+                          </div>
+
+                          {/* Action Buttons: Add to Cart & Compare */}
+                          <div style={{ display: 'flex', gap: '6px', width: '100%', marginTop: '0.4rem' }}>
+                            <button
+                              type="button"
+                              className="amazon-yellow-btn"
+                              style={{ flex: 1 }}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                addToCart(product);
+                              }}
+                              disabled={product.stock === 0}
+                            >
+                              {product.stock === 0 ? 'Out of Stock' : 'Add to Cart'}
+                            </button>
+                            <button
+                              type="button"
+                              className={`compare-toggle-btn ${comparedProducts.some((p) => p.id === product.id) ? 'active' : ''}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                toggleCompareProduct(product);
+                              }}
+                              title={comparedProducts.some((p) => p.id === product.id) ? "Remove from comparison" : "Compare specs"}
+                            >
+                              <Scale size={14} />
+                            </button>
+                          </div>
+                        </article>
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -3415,9 +3445,9 @@ function App() {
                   {authMode === 'register' && (
                     <div className="amazon-form-group">
                       <label>Your name</label>
-                      <input 
-                        type="text" 
-                        className="amazon-form-input" 
+                      <input
+                        type="text"
+                        className="amazon-form-input"
                         value={authForm.name}
                         onChange={(e) => setAuthForm({ ...authForm, name: e.target.value })}
                         required
@@ -3426,9 +3456,9 @@ function App() {
                   )}
                   <div className="amazon-form-group">
                     <label>Email or mobile phone number</label>
-                    <input 
-                      type="email" 
-                      className="amazon-form-input" 
+                    <input
+                      type="email"
+                      className="amazon-form-input"
                       value={authForm.email}
                       onChange={(e) => setAuthForm({ ...authForm, email: e.target.value })}
                       required
@@ -3436,9 +3466,9 @@ function App() {
                   </div>
                   <div className="amazon-form-group">
                     <label>Password</label>
-                    <input 
-                      type="password" 
-                      className="amazon-form-input" 
+                    <input
+                      type="password"
+                      className="amazon-form-input"
                       value={authForm.password}
                       onChange={(e) => setAuthForm({ ...authForm, password: e.target.value })}
                       required
@@ -3453,9 +3483,9 @@ function App() {
                   <span style={{ fontSize: '0.85rem', color: '#565959' }}>
                     {authMode === 'login' ? 'New to Big Deal?' : 'Already have an account?'}
                   </span>
-                  <button 
-                    type="button" 
-                    className="amazon-orange-btn" 
+                  <button
+                    type="button"
+                    className="amazon-orange-btn"
                     style={{ marginTop: '0.6rem' }}
                     onClick={() => setAuthMode(authMode === 'login' ? 'register' : 'login')}
                   >
@@ -3475,12 +3505,15 @@ function App() {
                   </button>
                 </div>
 
-                <div style={{ display: 'flex', gap: '1rem', marginBottom: '1.5rem' }}>
+                <div style={{ display: 'flex', gap: '1rem', marginBottom: '1.5rem', flexWrap: 'wrap' }}>
                   <button type="button" className={`price-go-btn ${accountSubTab === 'orders' ? 'font-bold' : ''}`} onClick={() => setAccountSubTab('orders')}>
                     Your Orders
                   </button>
                   <button type="button" className={`price-go-btn ${accountSubTab === 'wishlist' ? 'font-bold' : ''}`} onClick={() => setAccountSubTab('wishlist')}>
                     Your Wish List ({wishlist.length})
+                  </button>
+                  <button type="button" className={`price-go-btn ${accountSubTab === 'profile' ? 'font-bold' : ''}`} onClick={() => setAccountSubTab('profile')}>
+                    Help & Customer Care
                   </button>
                 </div>
 
@@ -3505,7 +3538,7 @@ function App() {
                           <div>
                             <span style={{ fontSize: '0.78rem', color: '#565959' }}>ORDER # {lastPlacedOrder.order_id}</span>
                             <div>
-                              <button 
+                              <button
                                 type="button"
                                 style={{ color: 'var(--amazon-link)', fontWeight: 600, textDecoration: 'underline', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
                                 onClick={() => {
@@ -3563,20 +3596,20 @@ function App() {
                               <line x1="0" y1="45" x2="600" y2="45" stroke="#cbd5e1" strokeDasharray="4 4" strokeWidth="1" />
                               <line x1="0" y1="90" x2="600" y2="90" stroke="#cbd5e1" strokeDasharray="4 4" strokeWidth="1" />
                               <line x1="0" y1="135" x2="600" y2="135" stroke="#cbd5e1" strokeDasharray="4 4" strokeWidth="1" />
-                              <path 
-                                d="M 40 90 Q 180 30, 300 90 T 560 90" 
-                                fill="none" 
-                                stroke="#94a3b8" 
-                                strokeWidth="8" 
-                                strokeLinecap="round" 
+                              <path
+                                d="M 40 90 Q 180 30, 300 90 T 560 90"
+                                fill="none"
+                                stroke="#94a3b8"
+                                strokeWidth="8"
+                                strokeLinecap="round"
                               />
-                              <path 
-                                d="M 40 90 Q 180 30, 300 90 T 560 90" 
-                                fill="none" 
-                                stroke="url(#routeGrad)" 
-                                strokeWidth="4" 
+                              <path
+                                d="M 40 90 Q 180 30, 300 90 T 560 90"
+                                fill="none"
+                                stroke="url(#routeGrad)"
+                                strokeWidth="4"
                                 strokeDasharray="6 4"
-                                strokeLinecap="round" 
+                                strokeLinecap="round"
                               />
                               <circle cx="40" cy="90" r="8" fill="#2563eb" />
                               <text x="40" y="125" textAnchor="middle" fill="#475569" fontSize="11" fontWeight="700">Hub: BLR-04</text>
@@ -3601,8 +3634,8 @@ function App() {
                               </div>
                             </div>
 
-                            <button 
-                              type="button" 
+                            <button
+                              type="button"
                               className="price-go-btn"
                               style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', background: '#0284c7', color: '#ffffff', borderColor: '#0284c7', padding: '6px 14px' }}
                               onClick={handleCallDriver}
@@ -3629,10 +3662,10 @@ function App() {
                           <img src={item.image_url} alt={item.title} className="listing-img" style={{ height: '160px' }} />
                           <h4 className="listing-title">{item.title}</h4>
                           <strong style={{ fontSize: '1.2rem' }}>{formatCurrency(item.price)}</strong>
-                          <button 
-                            type="button" 
-                            className="amazon-yellow-btn" 
-                            style={{ marginTop: '0.8rem' }} 
+                          <button
+                            type="button"
+                            className="amazon-yellow-btn"
+                            style={{ marginTop: '0.8rem' }}
                             onClick={(e) => {
                               e.stopPropagation();
                               addToCart(item);
@@ -3645,6 +3678,52 @@ function App() {
                     </div>
                   </div>
                 )}
+
+                {accountSubTab === 'profile' && (
+                  <div>
+                    <h3 style={{ fontSize: '1.2rem', marginBottom: '1rem' }}>Big Deal Customer Service & Help Centre</h3>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '1rem', marginBottom: '1.5rem' }}>
+                      <div style={{ border: '1px solid #d5d9d9', borderRadius: '8px', padding: '1.2rem', background: '#ffffff' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '0.6rem' }}>
+                          <Truck size={20} color="#007185" />
+                          <h4 style={{ margin: 0, fontSize: '1rem' }}>Instant Delivery Tracking</h4>
+                        </div>
+                        <p style={{ fontSize: '0.85rem', color: '#565959' }}>
+                          Track active shipments in real-time, contact courier executives, and view estimated delivery windows.
+                        </p>
+                        <button type="button" className="price-go-btn" style={{ marginTop: '0.6rem' }} onClick={() => setAccountSubTab('orders')}>
+                          View Active Orders
+                        </button>
+                      </div>
+
+                      <div style={{ border: '1px solid #d5d9d9', borderRadius: '8px', padding: '1.2rem', background: '#ffffff' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '0.6rem' }}>
+                          <RotateCcw size={20} color="#007185" />
+                          <h4 style={{ margin: 0, fontSize: '1rem' }}>Returns & Refunds Policy</h4>
+                        </div>
+                        <p style={{ fontSize: '0.85rem', color: '#565959' }}>
+                          Hassle-free 7-day doorstep replacement and instant UPI/Card refund on eligible products.
+                        </p>
+                        <button type="button" className="price-go-btn" style={{ marginTop: '0.6rem' }} onClick={() => showToast('For instant return initiation, select your order and click Request Return.', 'info')}>
+                          Return an Item
+                        </button>
+                      </div>
+
+                      <div style={{ border: '1px solid #d5d9d9', borderRadius: '8px', padding: '1.2rem', background: '#ffffff' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '0.6rem' }}>
+                          <Bot size={20} color="#0284c7" />
+                          <h4 style={{ margin: 0, fontSize: '1rem' }}>Genius AI Assistant</h4>
+                        </div>
+                        <p style={{ fontSize: '0.85rem', color: '#565959' }}>
+                          Need answers on orders, warranties, or product comparisons? Chat directly with our AI assistant.
+                        </p>
+                        <button type="button" className="amazon-yellow-btn" style={{ marginTop: '0.6rem', padding: '6px 14px' }} onClick={() => setIsAIOpen(true)}>
+                          Launch Live Chat
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -3653,132 +3732,231 @@ function App() {
         {/* CHECKOUT EXPERIENCE VIEW */}
         {activeView === 'checkout' && (
           <div className="single-view-container">
-            <h2 style={{ fontSize: '1.6rem', fontWeight: 600, marginBottom: '1.5rem' }}>Checkout</h2>
-            
-            <div className="checkout-grid">
+            {checkoutStep === 4 && lastPlacedOrder ? (
+              <div className="order-confirmed-container" style={{ background: '#ffffff', border: '1px solid #d5d9d9', borderRadius: '8px', padding: '2rem', maxWidth: '860px', margin: '0 auto' }}>
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: '1rem', borderBottom: '1px solid #e7e7e7', paddingBottom: '1.5rem', marginBottom: '1.5rem' }}>
+                  <div style={{ background: '#ecfdf5', borderRadius: '50%', padding: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <CheckCircle2 size={36} color="#059669" />
+                  </div>
+                  <div>
+                    <h2 style={{ fontSize: '1.6rem', fontWeight: 700, color: '#0f172a', margin: '0 0 6px' }}>Order Placed, Thank You!</h2>
+                    <p style={{ color: '#475569', fontSize: '0.92rem', margin: 0 }}>
+                      Confirmation and shipment tracking details have been sent to <strong>{lastPlacedOrder.customer_email}</strong>.
+                    </p>
+                    <div style={{ display: 'flex', gap: '1rem', marginTop: '10px', flexWrap: 'wrap', fontSize: '0.85rem' }}>
+                      <span style={{ color: '#64748b' }}>Order ID: <strong style={{ color: '#0f172a' }}>#{lastPlacedOrder.order_id}</strong></span>
+                      <span style={{ color: '#64748b' }}>Tracking ID: <strong style={{ color: '#0284c7' }}>{lastPlacedOrder.tracking_number}</strong></span>
+                      <span style={{ color: '#059669', fontWeight: 600 }}>⚡ {lastPlacedOrder.carrier}</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '1.2rem', background: '#f8fafc', padding: '1.2rem', borderRadius: '8px', marginBottom: '1.5rem' }}>
+                  <div>
+                    <span style={{ fontSize: '0.78rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase' }}>Guaranteed Delivery</span>
+                    <div style={{ fontSize: '1.05rem', fontWeight: 700, color: '#0f172a', marginTop: '2px' }}>{lastPlacedOrder.est_delivery}</div>
+                    <span style={{ fontSize: '0.78rem', color: '#0284c7', fontWeight: 600 }}>Prime Express Doorstep Delivery</span>
+                  </div>
+                  <div>
+                    <span style={{ fontSize: '0.78rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase' }}>Shipping To</span>
+                    <div style={{ fontSize: '0.92rem', fontWeight: 600, color: '#0f172a', marginTop: '2px' }}>{lastPlacedOrder.customer_name}</div>
+                    <div style={{ fontSize: '0.82rem', color: '#64748b' }}>{lastPlacedOrder.shipping_address}</div>
+                  </div>
+                  <div>
+                    <span style={{ fontSize: '0.78rem', color: '#64748b', fontWeight: 700, textTransform: 'uppercase' }}>Payment Method & Total</span>
+                    <div style={{ fontSize: '0.92rem', fontWeight: 600, color: '#0f172a', marginTop: '2px' }}>{lastPlacedOrder.payment_method}</div>
+                    <div style={{ fontSize: '1.15rem', fontWeight: 700, color: 'var(--amazon-price-red)', marginTop: '2px' }}>{formatCurrency(lastPlacedOrder.total)}</div>
+                  </div>
+                </div>
+
+                <h4 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: '0.8rem' }}>Items Ordered ({(lastPlacedOrder.items || []).length})</h4>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem', marginBottom: '1.8rem' }}>
+                  {(lastPlacedOrder.items || []).map((it, idx) => (
+                    <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: '1rem', padding: '0.6rem', border: '1px solid #e2e8f0', borderRadius: '6px' }}>
+                      {it.image_url && <img src={it.image_url} alt={it.title} style={{ width: '56px', height: '56px', objectFit: 'contain' }} />}
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontWeight: 600, fontSize: '0.9rem' }}>{it.title}</div>
+                        <div style={{ fontSize: '0.82rem', color: '#64748b' }}>Qty: {it.quantity || 1} • {formatCurrency(it.price)} each</div>
+                      </div>
+                      <strong style={{ color: 'var(--amazon-price-red)' }}>{formatCurrency((it.price || 0) * (it.quantity || 1))}</strong>
+                    </div>
+                  ))}
+                </div>
+
+                <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', borderTop: '1px solid #e7e7e7', paddingTop: '1.2rem' }}>
+                  <button
+                    type="button"
+                    className="amazon-yellow-btn"
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '8px 18px' }}
+                    onClick={() => {
+                      setInvoiceOrder(lastPlacedOrder);
+                      setIsInvoiceModalOpen(true);
+                      playAudioChime('click', soundEnabled);
+                    }}
+                  >
+                    <FileText size={15} />
+                    <span>View & Download Tax Invoice</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    className="price-go-btn"
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '8px 18px' }}
+                    onClick={() => {
+                      setActiveView('account');
+                      setAccountSubTab('orders');
+                      window.scrollTo({ top: 0, behavior: 'smooth' });
+                    }}
+                  >
+                    <PackageSearch size={15} />
+                    <span>Track in Your Orders</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    className="price-go-btn"
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '8px 18px' }}
+                    onClick={() => {
+                      setActiveView('shop');
+                      setCheckoutStep(1);
+                      window.scrollTo({ top: 0, behavior: 'smooth' });
+                    }}
+                  >
+                    <ShoppingBag size={15} />
+                    <span>Continue Shopping</span>
+                  </button>
+                </div>
+              </div>
+            ) : (
               <div>
-                <div className="checkout-stepper-header">
-                  <div className={`checkout-step-pill ${checkoutStep === 1 ? 'active' : checkoutStep > 1 ? 'completed' : ''}`} onClick={() => setCheckoutStep(1)}>
-                    <span>1. Delivery Address</span>
-                  </div>
-                  <ChevronRight size={14} color="#888c8c" />
-                  <div className={`checkout-step-pill ${checkoutStep === 2 ? 'active' : checkoutStep > 2 ? 'completed' : ''}`} onClick={() => setCheckoutStep(2)}>
-                    <span>2. Delivery Speed</span>
-                  </div>
-                  <ChevronRight size={14} color="#888c8c" />
-                  <div className={`checkout-step-pill ${checkoutStep === 3 ? 'active' : ''}`} onClick={() => setCheckoutStep(3)}>
-                    <span>3. Payment</span>
-                  </div>
-                </div>
+                <h2 style={{ fontSize: '1.6rem', fontWeight: 600, marginBottom: '1.5rem' }}>Checkout</h2>
 
-                {checkoutStep === 1 && (
+                <div className="checkout-grid">
                   <div>
-                    <h3 style={{ fontSize: '1.2rem', marginBottom: '1rem' }}>Select a delivery address</h3>
-                    <div className="amazon-form-group">
-                      <label>Full name</label>
-                      <input type="text" className="amazon-form-input" value={shippingData.fullName} onChange={(e) => setShippingData({ ...shippingData, fullName: e.target.value })} />
-                    </div>
-                    <div className="amazon-form-group">
-                      <label>Street address</label>
-                      <input type="text" className="amazon-form-input" value={shippingData.address} onChange={(e) => setShippingData({ ...shippingData, address: e.target.value })} />
-                    </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
-                      <div className="amazon-form-group">
-                        <label>City</label>
-                        <input type="text" className="amazon-form-input" value={shippingData.city} onChange={(e) => setShippingData({ ...shippingData, city: e.target.value })} />
+                    <div className="checkout-stepper-header">
+                      <div className={`checkout-step-pill ${checkoutStep === 1 ? 'active' : checkoutStep > 1 ? 'completed' : ''}`} onClick={() => setCheckoutStep(1)}>
+                        <span>1. Delivery Address</span>
                       </div>
-                      <div className="amazon-form-group">
-                        <label>PIN Code</label>
-                        <input type="text" className="amazon-form-input" value={shippingData.zipCode} onChange={(e) => setShippingData({ ...shippingData, zipCode: e.target.value })} />
+                      <ChevronRight size={14} color="#888c8c" />
+                      <div className={`checkout-step-pill ${checkoutStep === 2 ? 'active' : checkoutStep > 2 ? 'completed' : ''}`} onClick={() => setCheckoutStep(2)}>
+                        <span>2. Delivery Speed</span>
+                      </div>
+                      <ChevronRight size={14} color="#888c8c" />
+                      <div className={`checkout-step-pill ${checkoutStep === 3 ? 'active' : ''}`} onClick={() => setCheckoutStep(3)}>
+                        <span>3. Payment</span>
                       </div>
                     </div>
-                    <button type="button" className="amazon-yellow-btn" style={{ maxWidth: '240px', marginTop: '1rem', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }} onClick={() => setCheckoutStep(2)}>
-                      <span>Use this address</span>
-                      <ArrowRight size={14} />
-                    </button>
-                  </div>
-                )}
 
-                {checkoutStep === 2 && (
-                  <div>
-                    <h3 style={{ fontSize: '1.2rem', marginBottom: '1rem' }}>Choose your delivery options</h3>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem' }}>
-                      <label className="filter-checkbox-label" style={{ padding: '0.8rem', border: '1px solid #d5d9d9', borderRadius: '4px' }}>
-                        <input type="radio" name="speed" checked={shippingMethod === 'standard'} onChange={() => setShippingMethod('standard')} />
-                        <div>
-                          <strong>FREE Standard Delivery</strong>
-                          <div style={{ fontSize: '0.8rem', color: '#565959' }}>Get it in 2-3 business days</div>
+                    {checkoutStep === 1 && (
+                      <div>
+                        <h3 style={{ fontSize: '1.2rem', marginBottom: '1rem' }}>Select a delivery address</h3>
+                        <div className="amazon-form-group">
+                          <label>Full name</label>
+                          <input type="text" className="amazon-form-input" value={shippingData.fullName} onChange={(e) => setShippingData({ ...shippingData, fullName: e.target.value })} />
                         </div>
-                      </label>
-                      <label className="filter-checkbox-label" style={{ padding: '0.8rem', border: '1px solid #d5d9d9', borderRadius: '4px' }}>
-                        <input type="radio" name="speed" checked={shippingMethod === 'express'} onChange={() => setShippingMethod('express')} />
-                        <div>
-                          <strong>₹99 Express Next-Day Delivery</strong>
-                          <div style={{ fontSize: '0.8rem', color: '#565959' }}>Guaranteed delivery by Tomorrow 11 AM</div>
+                        <div className="amazon-form-group">
+                          <label>Street address</label>
+                          <input type="text" className="amazon-form-input" value={shippingData.address} onChange={(e) => setShippingData({ ...shippingData, address: e.target.value })} />
                         </div>
-                      </label>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+                          <div className="amazon-form-group">
+                            <label>City</label>
+                            <input type="text" className="amazon-form-input" value={shippingData.city} onChange={(e) => setShippingData({ ...shippingData, city: e.target.value })} />
+                          </div>
+                          <div className="amazon-form-group">
+                            <label>PIN Code</label>
+                            <input type="text" className="amazon-form-input" value={shippingData.zipCode} onChange={(e) => setShippingData({ ...shippingData, zipCode: e.target.value })} />
+                          </div>
+                        </div>
+                        <button type="button" className="amazon-yellow-btn" style={{ maxWidth: '240px', marginTop: '1rem', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }} onClick={() => setCheckoutStep(2)}>
+                          <span>Use this address</span>
+                          <ArrowRight size={14} />
+                        </button>
+                      </div>
+                    )}
+
+                    {checkoutStep === 2 && (
+                      <div>
+                        <h3 style={{ fontSize: '1.2rem', marginBottom: '1rem' }}>Choose your delivery options</h3>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem' }}>
+                          <label className="filter-checkbox-label" style={{ padding: '0.8rem', border: '1px solid #d5d9d9', borderRadius: '4px' }}>
+                            <input type="radio" name="speed" checked={shippingMethod === 'standard'} onChange={() => setShippingMethod('standard')} />
+                            <div>
+                              <strong>FREE Standard Delivery</strong>
+                              <div style={{ fontSize: '0.8rem', color: '#565959' }}>Get it in 2-3 business days</div>
+                            </div>
+                          </label>
+                          <label className="filter-checkbox-label" style={{ padding: '0.8rem', border: '1px solid #d5d9d9', borderRadius: '4px' }}>
+                            <input type="radio" name="speed" checked={shippingMethod === 'express'} onChange={() => setShippingMethod('express')} />
+                            <div>
+                              <strong>₹99 Express Next-Day Delivery</strong>
+                              <div style={{ fontSize: '0.8rem', color: '#565959' }}>Guaranteed delivery by Tomorrow 11 AM</div>
+                            </div>
+                          </label>
+                        </div>
+                        <button type="button" className="amazon-yellow-btn" style={{ maxWidth: '240px', marginTop: '1rem', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }} onClick={() => setCheckoutStep(3)}>
+                          <span>Continue to Payment</span>
+                          <ArrowRight size={14} />
+                        </button>
+                      </div>
+                    )}
+
+                    {checkoutStep === 3 && (
+                      <div>
+                        <h3 style={{ fontSize: '1.2rem', marginBottom: '1rem' }}>Select a payment method</h3>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem', marginBottom: '1.5rem' }}>
+                          <label className="filter-checkbox-label" style={{ padding: '0.8rem', border: '1px solid #d5d9d9', borderRadius: '4px' }}>
+                            <input type="radio" name="pay" checked={paymentMethod === 'card'} onChange={() => setPaymentMethod('card')} />
+                            <div>
+                              <strong>Credit / Debit Card (Visa, MasterCard, RuPay)</strong>
+                              <div style={{ fontSize: '0.8rem', color: '#565959' }}>Save extra 10% with Bank offers</div>
+                            </div>
+                          </label>
+                          <label className="filter-checkbox-label" style={{ padding: '0.8rem', border: '1px solid #d5d9d9', borderRadius: '4px' }}>
+                            <input type="radio" name="pay" checked={paymentMethod === 'cod'} onChange={() => setPaymentMethod('cod')} />
+                            <div>
+                              <strong>Cash on Delivery (Pay at Doorstep / UPI QR)</strong>
+                            </div>
+                          </label>
+                        </div>
+                        <button
+                          type="button"
+                          className="amazon-yellow-btn"
+                          style={{ maxWidth: '280px' }}
+                          disabled={isCheckingOut || cart.length === 0}
+                          onClick={handleCheckout}
+                        >
+                          {isCheckingOut ? 'Placing your order...' : `Place your order in INR • ${formatCurrency(Math.max(0, cartTotal - (appliedPromo ? (appliedPromo.discount_amount != null ? Number(appliedPromo.discount_amount) : (appliedPromo.discount_type === 'percent' ? Math.round((cartTotal * (appliedPromo.discount_value || 0)) / 100) : Number(appliedPromo.discount_value || 0))) : 0)) + shippingCost)}`}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Order Summary Box */}
+                  <div style={{ border: '1px solid #d5d9d9', borderRadius: '8px', padding: '1.2rem', background: '#f8f8f8', height: 'fit-content' }}>
+                    <h4 style={{ fontSize: '1.1rem', fontWeight: 600, marginBottom: '0.8rem' }}>Order Summary</h4>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.4rem', fontSize: '0.88rem' }}>
+                      <span>Items ({cartCount}):</span>
+                      <span>{formatCurrency(cartTotal)}</span>
                     </div>
-                    <button type="button" className="amazon-yellow-btn" style={{ maxWidth: '240px', marginTop: '1rem', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }} onClick={() => setCheckoutStep(3)}>
-                      <span>Continue to Payment</span>
-                      <ArrowRight size={14} />
-                    </button>
-                  </div>
-                )}
-
-                {checkoutStep === 3 && (
-                  <div>
-                    <h3 style={{ fontSize: '1.2rem', marginBottom: '1rem' }}>Select a payment method</h3>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem', marginBottom: '1.5rem' }}>
-                      <label className="filter-checkbox-label" style={{ padding: '0.8rem', border: '1px solid #d5d9d9', borderRadius: '4px' }}>
-                        <input type="radio" name="pay" checked={paymentMethod === 'card'} onChange={() => setPaymentMethod('card')} />
-                        <div>
-                          <strong>Credit / Debit Card (Visa, MasterCard, RuPay)</strong>
-                          <div style={{ fontSize: '0.8rem', color: '#565959' }}>Save extra 10% with Bank offers</div>
-                        </div>
-                      </label>
-                      <label className="filter-checkbox-label" style={{ padding: '0.8rem', border: '1px solid #d5d9d9', borderRadius: '4px' }}>
-                        <input type="radio" name="pay" checked={paymentMethod === 'cod'} onChange={() => setPaymentMethod('cod')} />
-                        <div>
-                          <strong>Cash on Delivery (Pay at Doorstep / UPI QR)</strong>
-                        </div>
-                      </label>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.4rem', fontSize: '0.88rem' }}>
+                      <span>Delivery:</span>
+                      <span>{shippingCost === 0 ? 'FREE' : formatCurrency(shippingCost)}</span>
                     </div>
-                    <button 
-                      type="button" 
-                      className="amazon-yellow-btn" 
-                      style={{ maxWidth: '280px' }}
-                      disabled={isCheckingOut || cart.length === 0}
-                      onClick={handleCheckout}
-                    >
-                      {isCheckingOut ? 'Placing your order...' : `Place your order in INR • ${formatCurrency((appliedPromo ? Math.max(0, cartTotal - appliedPromo.discount_amount) : cartTotal) + shippingCost)}`}
-                    </button>
+                    {appliedPromo && (
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.4rem', fontSize: '0.88rem', color: '#007600' }}>
+                        <span>Promotion Applied:</span>
+                        <span>-{formatCurrency(appliedPromo.discount_amount != null ? Number(appliedPromo.discount_amount) : (appliedPromo.discount_type === 'percent' ? Math.round((cartTotal * (appliedPromo.discount_value || 0)) / 100) : Number(appliedPromo.discount_value || 0)))}</span>
+                      </div>
+                    )}
+                    <div style={{ borderTop: '1px solid #d5d9d9', paddingTop: '0.6rem', marginTop: '0.6rem', display: 'flex', justifyContent: 'space-between', fontSize: '1.2rem', fontWeight: 700, color: 'var(--amazon-price-red)' }}>
+                      <span>Order Total:</span>
+                      <span>{formatCurrency(Math.max(0, cartTotal - (appliedPromo ? (appliedPromo.discount_amount != null ? Number(appliedPromo.discount_amount) : (appliedPromo.discount_type === 'percent' ? Math.round((cartTotal * (appliedPromo.discount_value || 0)) / 100) : Number(appliedPromo.discount_value || 0))) : 0)) + shippingCost)}</span>
+                    </div>
                   </div>
-                )}
-              </div>
-
-              {/* Order Summary Box */}
-              <div style={{ border: '1px solid #d5d9d9', borderRadius: '8px', padding: '1.2rem', background: '#f8f8f8', height: 'fit-content' }}>
-                <h4 style={{ fontSize: '1.1rem', fontWeight: 600, marginBottom: '0.8rem' }}>Order Summary</h4>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.4rem', fontSize: '0.88rem' }}>
-                  <span>Items ({cartCount}):</span>
-                  <span>{formatCurrency(cartTotal)}</span>
-                </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.4rem', fontSize: '0.88rem' }}>
-                  <span>Delivery:</span>
-                  <span>{shippingCost === 0 ? 'FREE' : formatCurrency(shippingCost)}</span>
-                </div>
-                {appliedPromo && (
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.4rem', fontSize: '0.88rem', color: '#007600' }}>
-                    <span>Promotion Applied:</span>
-                    <span>-{formatCurrency(appliedPromo.discount_amount)}</span>
-                  </div>
-                )}
-                <div style={{ borderTop: '1px solid #d5d9d9', paddingTop: '0.6rem', marginTop: '0.6rem', display: 'flex', justifyContent: 'space-between', fontSize: '1.2rem', fontWeight: 700, color: 'var(--amazon-price-red)' }}>
-                  <span>Order Total:</span>
-                  <span>{formatCurrency((appliedPromo ? Math.max(0, cartTotal - appliedPromo.discount_amount) : cartTotal) + shippingCost)}</span>
                 </div>
               </div>
-            </div>
+            )}
           </div>
         )}
 
@@ -3803,8 +3981,8 @@ function App() {
                       <strong style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
                         <KeyRound size={15} color="#0f1111" /> Admin Credentials:
                       </strong>
-                      <button 
-                        type="button" 
+                      <button
+                        type="button"
                         className="quick-fill-creds-btn"
                         onClick={() => setAdminLoginForm({ username: 'admin', password: 'admin123' })}
                         style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}
@@ -3820,9 +3998,9 @@ function App() {
                   <form onSubmit={handleAdminLogin}>
                     <div className="amazon-form-group">
                       <label>Admin Username</label>
-                      <input 
-                        type="text" 
-                        className="amazon-form-input" 
+                      <input
+                        type="text"
+                        className="amazon-form-input"
                         value={adminLoginForm.username}
                         onChange={(e) => setAdminLoginForm({ ...adminLoginForm, username: e.target.value })}
                         placeholder="admin"
@@ -3832,9 +4010,9 @@ function App() {
 
                     <div className="amazon-form-group">
                       <label>Admin Password</label>
-                      <input 
-                        type="password" 
-                        className="amazon-form-input" 
+                      <input
+                        type="password"
+                        className="amazon-form-input"
                         placeholder="••••••••"
                         value={adminLoginForm.password}
                         onChange={(e) => setAdminLoginForm({ ...adminLoginForm, password: e.target.value })}
@@ -3843,8 +4021,8 @@ function App() {
                     </div>
 
                     <div style={{ display: 'flex', gap: '0.8rem', marginTop: '1.4rem' }}>
-                      <button 
-                        type="submit" 
+                      <button
+                        type="submit"
                         className="amazon-yellow-btn"
                         style={{ width: '100%', height: '42px', fontSize: '0.95rem', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
                         disabled={isLoggingInAdmin}
@@ -3852,8 +4030,8 @@ function App() {
                         <span>{isLoggingInAdmin ? 'Authenticating...' : 'Sign In to Admin Panel'}</span>
                         {!isLoggingInAdmin && <ArrowRight size={15} />}
                       </button>
-                      <button 
-                        type="button" 
+                      <button
+                        type="button"
                         className="price-go-btn"
                         onClick={() => setActiveView('shop')}
                       >
@@ -3875,16 +4053,16 @@ function App() {
                     <p>All-in-One Operations Console: Catalog, Live Orders, Promo Coupons, Users & Telemetry</p>
                   </div>
                   <div style={{ display: 'flex', gap: '0.6rem', flexWrap: 'wrap', alignItems: 'center' }}>
-                    <button 
-                      type="button" 
+                    <button
+                      type="button"
                       className="btn-add-product-pill"
                       onClick={() => setIsAddProductModalOpen(true)}
                       style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}
                     >
                       <Plus size={14} /> Add New Product
                     </button>
-                    <button 
-                      type="button" 
+                    <button
+                      type="button"
                       className="price-go-btn"
                       style={{ background: '#ffffff', color: '#131921', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '4px' }}
                       onClick={fetchAdminData}
@@ -3892,18 +4070,18 @@ function App() {
                     >
                       <RefreshCw size={13} /> Refresh Data
                     </button>
-                    <button 
-                      type="button" 
+                    <button
+                      type="button"
                       className="price-go-btn"
                       style={{ background: '#fff0f0', borderColor: '#ffcccc', color: '#cc0c39', fontWeight: 600 }}
                       onClick={handleAdminLogout}
                     >
                       Logout Admin
                     </button>
-                    <button 
-                      type="button" 
-                      className="amazon-yellow-btn" 
-                      style={{ maxWidth: '140px' }} 
+                    <button
+                      type="button"
+                      className="amazon-yellow-btn"
+                      style={{ maxWidth: '140px' }}
                       onClick={() => setActiveView('shop')}
                     >
                       ← Storefront
@@ -3970,36 +4148,36 @@ function App() {
 
                 {/* 3. WORKSPACE TABS SWITCHER */}
                 <div className="admin-workspace-tabs">
-                  <button 
-                    type="button" 
+                  <button
+                    type="button"
                     className={`admin-workspace-tab ${adminActiveTab === 'products' ? 'active' : ''}`}
                     onClick={() => setAdminActiveTab('products')}
                   >
                     <Package size={15} style={{ marginRight: 6 }} /> Products & Inventory ({products.length})
                   </button>
-                  <button 
-                    type="button" 
+                  <button
+                    type="button"
                     className={`admin-workspace-tab ${adminActiveTab === 'orders' ? 'active' : ''}`}
                     onClick={() => setAdminActiveTab('orders')}
                   >
                     <ShoppingBag size={15} style={{ marginRight: 6 }} /> Orders & Fulfillment ({adminOrders.length})
                   </button>
-                  <button 
-                    type="button" 
+                  <button
+                    type="button"
                     className={`admin-workspace-tab ${adminActiveTab === 'promos' ? 'active' : ''}`}
                     onClick={() => setAdminActiveTab('promos')}
                   >
                     <Tag size={15} style={{ marginRight: 6 }} /> Promo Codes & Discounts ({adminPromos.length})
                   </button>
-                  <button 
-                    type="button" 
+                  <button
+                    type="button"
                     className={`admin-workspace-tab ${adminActiveTab === 'users' ? 'active' : ''}`}
                     onClick={() => setAdminActiveTab('users')}
                   >
                     <Users size={15} style={{ marginRight: 6 }} /> Customer Accounts ({adminUsers.length})
                   </button>
-                  <button 
-                    type="button" 
+                  <button
+                    type="button"
                     className={`admin-workspace-tab ${adminActiveTab === 'settings' ? 'active' : ''}`}
                     onClick={() => setAdminActiveTab('settings')}
                   >
@@ -4041,9 +4219,9 @@ function App() {
                       <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'center' }}>
                         <div className="admin-search-box">
                           <Search size={14} color="#888c8c" />
-                          <input 
-                            type="text" 
-                            placeholder="Filter by title or department..." 
+                          <input
+                            type="text"
+                            placeholder="Filter by title or department..."
                             value={adminCatalogSearch}
                             onChange={(e) => setAdminCatalogSearch(e.target.value)}
                           />
@@ -4054,8 +4232,8 @@ function App() {
                           )}
                         </div>
 
-                        <button 
-                          type="button" 
+                        <button
+                          type="button"
                           className="btn-add-product-pill"
                           onClick={() => setIsAddProductModalOpen(true)}
                           style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}
@@ -4093,10 +4271,10 @@ function App() {
                             .map((p) => (
                               <tr key={p.id}>
                                 <td>
-                                  <img 
-                                    src={p.image_url} 
-                                    alt={p.title} 
-                                    style={{ width: '48px', height: '48px', objectFit: 'contain', background: '#f8fafc', borderRadius: '6px', border: '1px solid #e2e8f0' }} 
+                                  <img
+                                    src={p.image_url}
+                                    alt={p.title}
+                                    style={{ width: '48px', height: '48px', objectFit: 'contain', background: '#f8fafc', borderRadius: '6px', border: '1px solid #e2e8f0' }}
                                     onError={(e) => handleImageError(e, p.title, p.category, p.image_url)}
                                   />
                                 </td>
@@ -4111,26 +4289,26 @@ function App() {
                                 </td>
                                 <td>
                                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                                    <button 
-                                      type="button" 
-                                      className="price-go-btn" 
+                                    <button
+                                      type="button"
+                                      className="price-go-btn"
                                       style={{ padding: '2px 6px', fontSize: '0.8rem', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
                                       onClick={() => handleQuickStockChange(p, -1)}
                                       title="Decrease stock by 1"
                                     >
                                       <Minus size={11} />
                                     </button>
-                                    <span style={{ 
-                                      fontWeight: 700, 
-                                      minWidth: '55px', 
+                                    <span style={{
+                                      fontWeight: 700,
+                                      minWidth: '55px',
                                       textAlign: 'center',
-                                      color: (p.stock || 10) === 0 ? '#b91c1c' : (p.stock || 10) <= 3 ? '#d97706' : '#15803d' 
+                                      color: (p.stock || 10) === 0 ? '#b91c1c' : (p.stock || 10) <= 3 ? '#d97706' : '#15803d'
                                     }}>
                                       {(p.stock || 10)} units
                                     </span>
-                                    <button 
-                                      type="button" 
-                                      className="price-go-btn" 
+                                    <button
+                                      type="button"
+                                      className="price-go-btn"
                                       style={{ padding: '2px 6px', fontSize: '0.8rem', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
                                       onClick={() => handleQuickStockChange(p, 1)}
                                       title="Increase stock by 1"
@@ -4149,8 +4327,8 @@ function App() {
                                   <button type="button" className="price-go-btn" onClick={() => openProductDetails(p)} title="Preview in Buy Box">
                                     Preview
                                   </button>
-                                  <button 
-                                    type="button" 
+                                  <button
+                                    type="button"
                                     className="btn-edit-action"
                                     onClick={() => openEditProductModal(p)}
                                     title="Edit product details, pricing, and photos"
@@ -4158,8 +4336,8 @@ function App() {
                                   >
                                     <Edit3 size={13} /> Edit
                                   </button>
-                                  <button 
-                                    type="button" 
+                                  <button
+                                    type="button"
                                     className="btn-delete-action"
                                     onClick={() => handleDeleteProduct(p.id, p.title)}
                                     title="Remove from store catalog"
@@ -4289,21 +4467,21 @@ function App() {
                       <form onSubmit={handleCreatePromo} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr)) 160px', gap: '1rem', alignItems: 'flex-end' }}>
                         <div className="amazon-form-group" style={{ margin: 0 }}>
                           <label>Coupon Code (e.g. FESTIVAL20)</label>
-                          <input 
-                            type="text" 
-                            className="amazon-form-input" 
-                            placeholder="CODE20" 
-                            value={newPromoForm.code} 
-                            onChange={(e) => setNewPromoForm({ ...newPromoForm, code: e.target.value })} 
-                            required 
+                          <input
+                            type="text"
+                            className="amazon-form-input"
+                            placeholder="CODE20"
+                            value={newPromoForm.code}
+                            onChange={(e) => setNewPromoForm({ ...newPromoForm, code: e.target.value })}
+                            required
                           />
                         </div>
 
                         <div className="amazon-form-group" style={{ margin: 0 }}>
                           <label>Discount Type</label>
-                          <select 
-                            className="amazon-form-input" 
-                            value={newPromoForm.discount_type} 
+                          <select
+                            className="amazon-form-input"
+                            value={newPromoForm.discount_type}
                             onChange={(e) => setNewPromoForm({ ...newPromoForm, discount_type: e.target.value })}
                           >
                             <option value="percent">Percentage (%)</option>
@@ -4313,20 +4491,20 @@ function App() {
 
                         <div className="amazon-form-group" style={{ margin: 0 }}>
                           <label>Discount Value</label>
-                          <input 
-                            type="number" 
-                            min="1" 
-                            className="amazon-form-input" 
-                            placeholder="e.g. 15" 
-                            value={newPromoForm.discount_value} 
-                            onChange={(e) => setNewPromoForm({ ...newPromoForm, discount_value: e.target.value })} 
-                            required 
+                          <input
+                            type="number"
+                            min="1"
+                            className="amazon-form-input"
+                            placeholder="e.g. 15"
+                            value={newPromoForm.discount_value}
+                            onChange={(e) => setNewPromoForm({ ...newPromoForm, discount_value: e.target.value })}
+                            required
                           />
                         </div>
 
-                        <button 
-                          type="submit" 
-                          className="btn-add-product-pill" 
+                        <button
+                          type="submit"
+                          className="btn-add-product-pill"
                           style={{ height: '38px', justifyContent: 'center', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
                           disabled={isCreatingPromo}
                         >
@@ -4364,8 +4542,8 @@ function App() {
                                 </span>
                               </td>
                               <td>
-                                <button 
-                                  type="button" 
+                                <button
+                                  type="button"
                                   className="btn-delete-action"
                                   onClick={() => handleDeletePromo(p.code)}
                                   style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}
@@ -4448,8 +4626,8 @@ function App() {
                           <div><strong>Admin Username:</strong> <code>admin</code></div>
                           <div><strong>Authorization Scope:</strong> <code>Full Catalog & Order Management</code></div>
                         </div>
-                        <button 
-                          type="button" 
+                        <button
+                          type="button"
                           className="price-go-btn"
                           style={{ marginTop: '1rem', background: '#fff0f0', borderColor: '#ffcccc', color: '#cc0c39', fontWeight: 700 }}
                           onClick={handleAdminLogout}
@@ -4529,8 +4707,8 @@ function App() {
                 <span>Subtotal:</span>
                 <strong style={{ color: 'var(--amazon-price-red)' }}>{formatCurrency(cartTotal)}</strong>
               </div>
-              <button 
-                type="button" 
+              <button
+                type="button"
                 className="amazon-yellow-btn"
                 onClick={() => {
                   setIsCartOpen(false);
@@ -4580,21 +4758,21 @@ function App() {
 
                 {!is360Active ? (
                   <>
-                    <div 
+                    <div
                       className="modal-large-img-box"
                       onMouseMove={handleImageZoom}
                       onMouseLeave={handleImageZoomLeave}
                     >
-                      <img 
+                      <img
                         src={
                           activeModalProduct.images && activeModalProduct.images[selectedImageIndex]
                             ? (typeof activeModalProduct.images[selectedImageIndex] === 'string'
-                                ? activeModalProduct.images[selectedImageIndex]
-                                : (activeModalProduct.images[selectedImageIndex].image_url || activeModalProduct.image_url || getSmartProductFallback(activeModalProduct.title, activeModalProduct.category)))
+                              ? activeModalProduct.images[selectedImageIndex]
+                              : (activeModalProduct.images[selectedImageIndex].image_url || activeModalProduct.image_url || getSmartProductFallback(activeModalProduct.title, activeModalProduct.category)))
                             : (activeModalProduct.image_url || getSmartProductFallback(activeModalProduct.title, activeModalProduct.category))
-                        } 
-                        alt={activeModalProduct.title} 
-                        className="modal-large-img" 
+                        }
+                        alt={activeModalProduct.title}
+                        className="modal-large-img"
                         style={{
                           transform: zoomState.active ? 'scale(2.2)' : 'scale(1)',
                           transformOrigin: `${zoomState.x}% ${zoomState.y}%`,
@@ -4612,8 +4790,8 @@ function App() {
                         {activeModalProduct.images.map((img, idx) => {
                           const thumbUrl = typeof img === 'string' ? img : (img.image_url || activeModalProduct.image_url || getSmartProductFallback(activeModalProduct.title, activeModalProduct.category));
                           return (
-                            <div 
-                              key={idx} 
+                            <div
+                              key={idx}
                               className={`modal-thumb-item ${selectedImageIndex === idx ? 'active' : ''}`}
                               onClick={() => setSelectedImageIndex(idx)}
                             >
@@ -4627,7 +4805,7 @@ function App() {
                 ) : (
                   /* 360° Drag Turntable & AR Stage */
                   <div className="turntable-container">
-                    <div 
+                    <div
                       className="turntable-stage"
                       onMouseDown={handleTurntableMouseDown}
                       onMouseMove={handleTurntableMouseMove}
@@ -4636,16 +4814,16 @@ function App() {
                       onTouchMove={handleTurntableMouseMove}
                       onTouchEnd={handleTurntableMouseUp}
                       style={{
-                        background: arRoom === 'office' 
-                          ? 'radial-gradient(circle, #334155 0%, #0f172a 100%)' 
-                          : arRoom === 'living' 
-                          ? 'radial-gradient(circle, #475569 0%, #1e293b 100%)' 
-                          : 'radial-gradient(circle, #ffffff 0%, #e2e8f0 100%)',
+                        background: arRoom === 'office'
+                          ? 'radial-gradient(circle, #334155 0%, #0f172a 100%)'
+                          : arRoom === 'living'
+                            ? 'radial-gradient(circle, #475569 0%, #1e293b 100%)'
+                            : 'radial-gradient(circle, #ffffff 0%, #e2e8f0 100%)',
                         borderRadius: '8px'
                       }}
                     >
-                      <img 
-                        src={activeModalProduct.image_url || getSmartProductFallback(activeModalProduct.title, activeModalProduct.category)} 
+                      <img
+                        src={activeModalProduct.image_url || getSmartProductFallback(activeModalProduct.title, activeModalProduct.category)}
                         alt="360 view"
                         className="turntable-img"
                         style={{
@@ -4657,8 +4835,8 @@ function App() {
 
                     <div className="turntable-controls-bar">
                       <span>🔄 {Math.round((turntableAngle % 360 + 360) % 360)}° Angle • Drag left/right to spin</span>
-                      <button 
-                        type="button" 
+                      <button
+                        type="button"
                         style={{ color: '#2563eb', fontWeight: 700 }}
                         onClick={() => setTurntableAngle(0)}
                       >
@@ -4670,23 +4848,23 @@ function App() {
                     <div style={{ marginTop: '0.8rem' }}>
                       <span style={{ fontSize: '0.78rem', color: '#64748b', fontWeight: 600 }}>Simulate in AR Room Environment:</span>
                       <div className="ar-room-selector">
-                        <button 
-                          type="button" 
-                          className={`ar-room-btn ${arRoom === 'studio' ? 'active' : ''}`} 
+                        <button
+                          type="button"
+                          className={`ar-room-btn ${arRoom === 'studio' ? 'active' : ''}`}
                           onClick={() => setArRoom('studio')}
                         >
                           Studio White
                         </button>
-                        <button 
-                          type="button" 
-                          className={`ar-room-btn ${arRoom === 'office' ? 'active' : ''}`} 
+                        <button
+                          type="button"
+                          className={`ar-room-btn ${arRoom === 'office' ? 'active' : ''}`}
                           onClick={() => setArRoom('office')}
                         >
                           Executive Desk
                         </button>
-                        <button 
-                          type="button" 
-                          className={`ar-room-btn ${arRoom === 'living' ? 'active' : ''}`} 
+                        <button
+                          type="button"
+                          className={`ar-room-btn ${arRoom === 'living' ? 'active' : ''}`}
                           onClick={() => setArRoom('living')}
                         >
                           Nordic Living Room
@@ -4740,7 +4918,7 @@ function App() {
                   </div>
 
                   <div style={{ marginTop: '8px' }}>
-                    <span 
+                    <span
                       style={{ fontSize: '0.82rem', color: 'var(--amazon-link)', cursor: 'pointer', textDecoration: 'underline', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '4px' }}
                       onClick={() => setIsEmiModalOpen(true)}
                     >
@@ -4809,15 +4987,15 @@ function App() {
                           <strong style={{ fontSize: '0.88rem', color: '#0f172a' }}>Historical Price Trend & Camel Tracker</strong>
                         </div>
                         <div className="price-history-range-pills">
-                          <button 
-                            type="button" 
+                          <button
+                            type="button"
                             className={`price-range-btn ${priceHistoryRange === '30d' ? 'active' : ''}`}
                             onClick={() => setPriceHistoryRange('30d')}
                           >
                             30D
                           </button>
-                          <button 
-                            type="button" 
+                          <button
+                            type="button"
                             className={`price-range-btn ${priceHistoryRange === '90d' ? 'active' : ''}`}
                             onClick={() => setPriceHistoryRange('90d')}
                           >
@@ -4877,8 +5055,8 @@ function App() {
                       <div className="price-alert-section">
                         {!isPriceAlertSet ? (
                           !isPriceAlertOpen ? (
-                            <button 
-                              type="button" 
+                            <button
+                              type="button"
                               className="btn-open-price-alert"
                               onClick={() => setIsPriceAlertOpen(true)}
                             >
@@ -4891,18 +5069,18 @@ function App() {
                                 🔔 Notify me when price drops below:
                               </div>
                               <div style={{ display: 'flex', gap: '5px', marginTop: '4px' }}>
-                                <input 
-                                  type="email" 
-                                  className="amazon-form-input" 
+                                <input
+                                  type="email"
+                                  className="amazon-form-input"
                                   style={{ flex: 1, padding: '4px 8px', fontSize: '0.8rem' }}
-                                  placeholder="Your email address" 
+                                  placeholder="Your email address"
                                   value={priceAlertEmail}
                                   onChange={(e) => setPriceAlertEmail(e.target.value)}
                                   required
                                 />
-                                <input 
-                                  type="number" 
-                                  className="amazon-form-input" 
+                                <input
+                                  type="number"
+                                  className="amazon-form-input"
                                   style={{ width: '90px', padding: '4px 8px', fontSize: '0.8rem' }}
                                   placeholder={`₹${Math.round(baseP * 0.9)}`}
                                   value={priceAlertThreshold}
@@ -4930,7 +5108,7 @@ function App() {
 
                 <h4 style={{ fontSize: '1rem', marginTop: '1rem', marginBottom: '0.4rem' }}>About this item</h4>
                 <p style={{ fontSize: '0.9rem', lineHeight: 1.5, color: '#333333' }}>{activeModalProduct.description}</p>
-                
+
                 {/* Specifications Matrix */}
                 <div style={{ marginTop: '1rem', borderTop: '1px solid #e7e7e7', paddingTop: '0.8rem' }}>
                   <h5 style={{ fontSize: '0.92rem', marginBottom: '0.6rem' }}>Product Specifications</h5>
@@ -4990,8 +5168,8 @@ function App() {
                   {/* Pincode Input Form */}
                   <div className="pincode-input-section">
                     <div className="pincode-input-row">
-                      <input 
-                        type="text" 
+                      <input
+                        type="text"
                         maxLength={6}
                         placeholder="Enter 6-digit PIN"
                         className="pincode-input-field"
@@ -4999,8 +5177,8 @@ function App() {
                         onChange={(e) => setPincodeInput(e.target.value.replace(/\D/g, ''))}
                         onKeyDown={(e) => e.key === 'Enter' && handleCheckPincode(pincodeInput)}
                       />
-                      <button 
-                        type="button" 
+                      <button
+                        type="button"
                         className="pincode-check-btn"
                         disabled={isCheckingPincode}
                         onClick={() => handleCheckPincode(pincodeInput)}
@@ -5013,7 +5191,7 @@ function App() {
                     <div className="pincode-quick-chips">
                       <span style={{ fontSize: '0.72rem', color: '#64748b', fontWeight: 600 }}>Quick Select:</span>
                       {POPULAR_INDIAN_PINCODES.slice(0, 5).map((pc) => (
-                        <button 
+                        <button
                           key={pc.pincode}
                           type="button"
                           className={`pincode-city-chip ${deliveryPincode === pc.pincode ? 'active' : ''}`}
@@ -5033,9 +5211,9 @@ function App() {
                     <span className="buy-box-stock-out">Currently Unavailable</span>
                   )}
                 </div>
-                <button 
-                  type="button" 
-                  className="amazon-yellow-btn" 
+                <button
+                  type="button"
+                  className="amazon-yellow-btn"
                   disabled={(activeModalProduct.stock || 10) === 0}
                   onClick={() => {
                     addToCart(activeModalProduct);
@@ -5044,8 +5222,8 @@ function App() {
                 >
                   Add to Cart
                 </button>
-                <button 
-                  type="button" 
+                <button
+                  type="button"
                   className="amazon-orange-btn"
                   disabled={(activeModalProduct.stock || 10) === 0}
                   onClick={() => {
@@ -5056,21 +5234,21 @@ function App() {
                 >
                   Buy Now
                 </button>
-                <button 
-                  type="button" 
+                <button
+                  type="button"
                   className="price-go-btn"
                   style={{ width: '100%', marginTop: '0.2rem', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
                   onClick={() => toggleWishlist(activeModalProduct)}
                 >
-                  <Heart 
-                    size={15} 
-                    fill={wishlist.some(w => w.id === activeModalProduct.id) ? "#e11d48" : "transparent"} 
-                    color={wishlist.some(w => w.id === activeModalProduct.id) ? "#e11d48" : "#565959"} 
+                  <Heart
+                    size={15}
+                    fill={wishlist.some(w => w.id === activeModalProduct.id) ? "#e11d48" : "transparent"}
+                    color={wishlist.some(w => w.id === activeModalProduct.id) ? "#e11d48" : "#565959"}
                   />
                   <span>{wishlist.some(w => w.id === activeModalProduct.id) ? 'In Wish List' : 'Add to Wish List'}</span>
                 </button>
-                <button 
-                  type="button" 
+                <button
+                  type="button"
                   className="price-go-btn"
                   style={{ width: '100%', marginTop: '0.2rem', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
                   onClick={() => toggleCompareProduct(activeModalProduct)}
@@ -5106,7 +5284,7 @@ function App() {
                 stock: 20
               };
 
-              const activeBundleTotal = 
+              const activeBundleTotal =
                 (bundleChecked.main ? activeModalProduct.price : 0) +
                 (bundleChecked.item1 ? comp1Price : 0) +
                 (bundleChecked.item2 ? comp2Price : 0);
@@ -5170,26 +5348,26 @@ function App() {
                   {/* Bundle Checkboxes */}
                   <div className="bundle-checkboxes-list">
                     <label className="bundle-check-row">
-                      <input 
-                        type="checkbox" 
-                        checked={bundleChecked.main} 
-                        onChange={(e) => setBundleChecked({ ...bundleChecked, main: e.target.checked })} 
+                      <input
+                        type="checkbox"
+                        checked={bundleChecked.main}
+                        onChange={(e) => setBundleChecked({ ...bundleChecked, main: e.target.checked })}
                       />
                       <span><strong>This item:</strong> {activeModalProduct.title} — <strong style={{ color: 'var(--amazon-price-red)' }}>{formatCurrency(activeModalProduct.price)}</strong></span>
                     </label>
                     <label className="bundle-check-row">
-                      <input 
-                        type="checkbox" 
-                        checked={bundleChecked.item1} 
-                        onChange={(e) => setBundleChecked({ ...bundleChecked, item1: e.target.checked })} 
+                      <input
+                        type="checkbox"
+                        checked={bundleChecked.item1}
+                        onChange={(e) => setBundleChecked({ ...bundleChecked, item1: e.target.checked })}
                       />
                       <span><strong>Companion 1:</strong> {comp1.title} — <strong style={{ color: 'var(--amazon-price-red)' }}>{formatCurrency(comp1Price)}</strong></span>
                     </label>
                     <label className="bundle-check-row">
-                      <input 
-                        type="checkbox" 
-                        checked={bundleChecked.item2} 
-                        onChange={(e) => setBundleChecked({ ...bundleChecked, item2: e.target.checked })} 
+                      <input
+                        type="checkbox"
+                        checked={bundleChecked.item2}
+                        onChange={(e) => setBundleChecked({ ...bundleChecked, item2: e.target.checked })}
                       />
                       <span><strong>Companion 2:</strong> {comp2.title} — <strong style={{ color: 'var(--amazon-price-red)' }}>{formatCurrency(comp2Price)}</strong></span>
                     </label>
@@ -5238,25 +5416,25 @@ function App() {
                           style={{ background: 'none', border: 'none', padding: '0 2px', cursor: 'pointer', display: 'inline-flex' }}
                           onClick={() => setNewReviewForm({ ...newReviewForm, rating: s })}
                         >
-                          <Star 
-                            size={16} 
-                            fill={s <= newReviewForm.rating ? "#de7921" : "transparent"} 
-                            color={s <= newReviewForm.rating ? "#de7921" : "#d5d9d9"} 
+                          <Star
+                            size={16}
+                            fill={s <= newReviewForm.rating ? "#de7921" : "transparent"}
+                            color={s <= newReviewForm.rating ? "#de7921" : "#d5d9d9"}
                           />
                         </button>
                       ))}
                     </div>
-                    <input 
-                      type="text" 
-                      placeholder="Your name (optional)" 
-                      className="amazon-form-input" 
-                      style={{ marginBottom: '0.5rem' }} 
+                    <input
+                      type="text"
+                      placeholder="Your name (optional)"
+                      className="amazon-form-input"
+                      style={{ marginBottom: '0.5rem' }}
                       value={newReviewForm.username}
                       onChange={(e) => setNewReviewForm({ ...newReviewForm, username: e.target.value })}
                     />
-                    <textarea 
-                      placeholder="Write your review here..." 
-                      className="amazon-form-input" 
+                    <textarea
+                      placeholder="Write your review here..."
+                      className="amazon-form-input"
                       style={{ height: '70px', resize: 'vertical', marginBottom: '0.6rem' }}
                       value={newReviewForm.comment}
                       onChange={(e) => setNewReviewForm({ ...newReviewForm, comment: e.target.value })}
@@ -5327,10 +5505,10 @@ function App() {
             <div className="amazon-form-group" style={{ marginTop: '1rem' }}>
               <label style={{ fontWeight: 700, fontSize: '0.88rem' }}>Enter 6-digit Indian PIN code</label>
               <div style={{ display: 'flex', gap: '0.5rem', marginTop: '4px' }}>
-                <input 
-                  type="text" 
+                <input
+                  type="text"
                   maxLength={6}
-                  className="amazon-form-input" 
+                  className="amazon-form-input"
                   placeholder="e.g. 600053, 560001, 400001"
                   value={tempPincode}
                   onChange={(e) => setTempPincode(e.target.value.replace(/\D/g, ''))}
@@ -5341,8 +5519,8 @@ function App() {
                     }
                   }}
                 />
-                <button 
-                  type="button" 
+                <button
+                  type="button"
                   className="btn-add-product-pill"
                   style={{ minWidth: '100px', justifyContent: 'center' }}
                   disabled={isCheckingPincode}
@@ -5361,7 +5539,7 @@ function App() {
               <span style={{ fontSize: '0.82rem', fontWeight: 700, color: '#334155' }}>Popular Delivery Hubs (Click to switch):</span>
               <div className="location-cities-grid">
                 {POPULAR_INDIAN_PINCODES.map((pc) => (
-                  <div 
+                  <div
                     key={pc.pincode}
                     className={`loc-city-card ${deliveryPincode === pc.pincode ? 'active' : ''}`}
                     onClick={() => {
@@ -5386,10 +5564,10 @@ function App() {
           <div style={{ background: '#ffffff', width: '380px', borderRadius: '8px', padding: '1.5rem', boxShadow: 'var(--shadow-modal)' }} onClick={(e) => e.stopPropagation()}>
             <h3 style={{ fontSize: '1.15rem', marginBottom: '0.8rem' }}>Language & Currency Settings</h3>
             <p style={{ fontSize: '0.85rem', color: '#565959', marginBottom: '1rem' }}>Select your preferred currency for browsing & payments.</p>
-            
+
             <div className="amazon-form-group">
               <label>Select Currency</label>
-              <select 
+              <select
                 className="amazon-form-input"
                 value={currency}
                 onChange={(e) => {
@@ -5406,9 +5584,9 @@ function App() {
             </div>
 
             <div style={{ marginTop: '1.2rem', display: 'flex', justifyContent: 'flex-end', gap: '0.6rem' }}>
-              <button 
-                type="button" 
-                className="amazon-yellow-btn" 
+              <button
+                type="button"
+                className="amazon-yellow-btn"
                 style={{ maxWidth: '140px' }}
                 onClick={() => setIsCurrencyModalOpen(false)}
               >
@@ -5449,11 +5627,11 @@ function App() {
                 </tr>
               </thead>
               <tbody>
-                {activeReceiptOrder.items.map((it, idx) => (
+                {(activeReceiptOrder.items || []).map((it, idx) => (
                   <tr key={idx}>
-                    <td>{it.title}</td>
-                    <td>{it.quantity}</td>
-                    <td>{formatCurrency(it.price * it.quantity)}</td>
+                    <td>{it.title || 'Product Item'}</td>
+                    <td>{it.quantity || 1}</td>
+                    <td>{formatCurrency((it.price || 0) * (it.quantity || 1))}</td>
                   </tr>
                 ))}
               </tbody>
@@ -5485,9 +5663,9 @@ function App() {
                 <Package size={18} />
                 <span>Add New Product to Store Catalog</span>
               </h3>
-              <button 
-                type="button" 
-                className="modal-close-x" 
+              <button
+                type="button"
+                className="modal-close-x"
                 style={{ color: '#ffffff' }}
                 onClick={() => setIsAddProductModalOpen(false)}
               >
@@ -5524,7 +5702,7 @@ function App() {
                   <label>
                     Product Title <span style={{ color: '#cc0c39' }}>*</span>
                   </label>
-                  <input 
+                  <input
                     type="text"
                     className="amazon-form-input"
                     placeholder="e.g. Apple iPhone 15 Pro 128GB Black Titanium"
@@ -5558,7 +5736,7 @@ function App() {
                   {newProductForm.category === '__custom__' && (
                     <div className="amazon-form-group">
                       <label>New Category Name <span style={{ color: '#cc0c39' }}>*</span></label>
-                      <input 
+                      <input
                         type="text"
                         className="amazon-form-input"
                         placeholder="e.g. Smart Home"
@@ -5573,7 +5751,7 @@ function App() {
                     <label>
                       Base Price (in INR ₹) <span style={{ color: '#cc0c39' }}>*</span>
                     </label>
-                    <input 
+                    <input
                       type="number"
                       step="0.01"
                       min="1"
@@ -5587,7 +5765,7 @@ function App() {
 
                   <div className="amazon-form-group">
                     <label>Initial Stock Inventory</label>
-                    <input 
+                    <input
                       type="number"
                       min="0"
                       className="amazon-form-input"
@@ -5602,7 +5780,7 @@ function App() {
                   <label>
                     Primary Image URL (Direct image link, Amazon URL, or upload file) <span style={{ color: '#cc0c39' }}>*</span>
                   </label>
-                  <input 
+                  <input
                     type="text"
                     className="amazon-form-input"
                     placeholder="Paste image link, Amazon product URL, or click upload below..."
@@ -5622,9 +5800,9 @@ function App() {
                   <div style={{ display: 'flex', gap: '0.4rem', marginTop: '0.5rem', flexWrap: 'wrap', alignItems: 'center' }}>
                     <label className="price-go-btn" style={{ cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '0.78rem', background: '#f8fafc', border: '1px solid #cbd5e1' }}>
                       <Upload size={12} /> Upload from Device
-                      <input 
-                        type="file" 
-                        accept="image/*" 
+                      <input
+                        type="file"
+                        accept="image/*"
                         style={{ display: 'none' }}
                         onChange={(e) => {
                           const file = e.target.files?.[0];
@@ -5640,9 +5818,9 @@ function App() {
                       />
                     </label>
                     <span style={{ fontSize: '0.75rem', color: '#64748b' }}>Quick Photos:</span>
-                    <button 
-                      type="button" 
-                      className="price-go-btn" 
+                    <button
+                      type="button"
+                      className="price-go-btn"
                       style={{ fontSize: '0.74rem', background: '#fef3c7', color: '#92400e', borderColor: '#fde68a', fontWeight: 700 }}
                       onClick={() => {
                         setNewProductForm({ ...newProductForm, image_url: 'https://images.unsplash.com/photo-1511499767150-a48a237f0083?auto=format&fit=crop&w=600&q=80' });
@@ -5651,9 +5829,9 @@ function App() {
                     >
                       🕶️ Sunglasses
                     </button>
-                    <button 
-                      type="button" 
-                      className="price-go-btn" 
+                    <button
+                      type="button"
+                      className="price-go-btn"
                       style={{ fontSize: '0.74rem', background: '#eff6ff', color: '#1d4ed8', borderColor: '#bfdbfe' }}
                       onClick={() => {
                         setNewProductForm({ ...newProductForm, image_url: 'https://images.unsplash.com/photo-1523275335684-37898b6baf30?auto=format&fit=crop&w=600&q=80' });
@@ -5662,9 +5840,9 @@ function App() {
                     >
                       ⌚ Smart Watch
                     </button>
-                    <button 
-                      type="button" 
-                      className="price-go-btn" 
+                    <button
+                      type="button"
+                      className="price-go-btn"
                       style={{ fontSize: '0.74rem', background: '#eff6ff', color: '#1d4ed8', borderColor: '#bfdbfe' }}
                       onClick={() => {
                         setNewProductForm({ ...newProductForm, image_url: 'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?auto=format&fit=crop&w=600&q=80' });
@@ -5673,9 +5851,9 @@ function App() {
                     >
                       🎧 Headphones
                     </button>
-                    <button 
-                      type="button" 
-                      className="price-go-btn" 
+                    <button
+                      type="button"
+                      className="price-go-btn"
                       style={{ fontSize: '0.74rem', background: '#eff6ff', color: '#1d4ed8', borderColor: '#bfdbfe' }}
                       onClick={() => {
                         setNewProductForm({ ...newProductForm, image_url: 'https://images.unsplash.com/photo-1542291026-7eec264c27ff?auto=format&fit=crop&w=600&q=80' });
@@ -5684,9 +5862,9 @@ function App() {
                     >
                       👟 Sports Shoes
                     </button>
-                    <button 
-                      type="button" 
-                      className="price-go-btn" 
+                    <button
+                      type="button"
+                      className="price-go-btn"
                       style={{ fontSize: '0.74rem', background: '#eff6ff', color: '#1d4ed8', borderColor: '#bfdbfe' }}
                       onClick={() => {
                         setNewProductForm({ ...newProductForm, image_url: 'https://images.unsplash.com/photo-1511499767150-a48a237f0083?auto=format&fit=crop&w=600&q=80' });
@@ -5695,9 +5873,9 @@ function App() {
                     >
                       🕶️ Sunglasses
                     </button>
-                    <button 
-                      type="button" 
-                      className="price-go-btn" 
+                    <button
+                      type="button"
+                      className="price-go-btn"
                       style={{ fontSize: '0.74rem', background: '#eff6ff', color: '#1d4ed8', borderColor: '#bfdbfe' }}
                       onClick={() => {
                         setNewProductForm({ ...newProductForm, image_url: 'https://images.unsplash.com/photo-1576566588028-4147f3842f27?auto=format&fit=crop&w=600&q=80' });
@@ -5711,9 +5889,9 @@ function App() {
                   {/* Visual Image Preview */}
                   {newProductForm.image_url && (
                     <div className="product-img-preview-container" style={{ marginTop: '0.8rem' }}>
-                      <img 
-                        src={autoResolveImageUrl(newProductForm.image_url, newProductForm.title, newProductForm.category)} 
-                        alt="Product preview" 
+                      <img
+                        src={autoResolveImageUrl(newProductForm.image_url, newProductForm.title, newProductForm.category)}
+                        alt="Product preview"
                         className="product-img-preview-thumb"
                         onError={(e) => handleImageError(e, newProductForm.title, newProductForm.category, newProductForm.image_url)}
                       />
@@ -5729,7 +5907,7 @@ function App() {
                   <label>
                     Product Description & Key Features <span style={{ color: '#cc0c39' }}>*</span>
                   </label>
-                  <textarea 
+                  <textarea
                     className="amazon-form-input"
                     rows="3"
                     placeholder="Enter key selling points, specifications, and warranty details..."
@@ -5741,7 +5919,7 @@ function App() {
 
                 <div className="amazon-form-group">
                   <label>Additional Gallery Image URLs (Optional, one per line)</label>
-                  <textarea 
+                  <textarea
                     className="amazon-form-input"
                     rows="2"
                     placeholder="https://images.unsplash.com/... (optional extra angles)"
@@ -5751,15 +5929,15 @@ function App() {
                 </div>
 
                 <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.8rem', marginTop: '1.5rem', borderTop: '1px solid #e7e7e7', paddingTop: '1rem' }}>
-                  <button 
-                    type="button" 
-                    className="price-go-btn" 
+                  <button
+                    type="button"
+                    className="price-go-btn"
                     onClick={() => setIsAddProductModalOpen(false)}
                   >
                     Cancel
                   </button>
-                  <button 
-                    type="submit" 
+                  <button
+                    type="submit"
                     className="btn-add-product-pill"
                     disabled={isSubmittingProduct}
                     style={{ minWidth: '170px', justifyContent: 'center', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
@@ -5783,9 +5961,9 @@ function App() {
                 <Edit3 size={18} />
                 <span>Edit Product Details (ID: #{editingProduct.id})</span>
               </h3>
-              <button 
-                type="button" 
-                className="modal-close-x" 
+              <button
+                type="button"
+                className="modal-close-x"
                 style={{ color: '#ffffff' }}
                 onClick={() => setIsEditProductModalOpen(false)}
               >
@@ -5799,7 +5977,7 @@ function App() {
                   <label>
                     Product Title <span style={{ color: '#cc0c39' }}>*</span>
                   </label>
-                  <input 
+                  <input
                     type="text"
                     className="amazon-form-input"
                     value={editProductForm.title}
@@ -5832,7 +6010,7 @@ function App() {
                   {editProductForm.category === '__custom__' && (
                     <div className="amazon-form-group">
                       <label>New Category Name <span style={{ color: '#cc0c39' }}>*</span></label>
-                      <input 
+                      <input
                         type="text"
                         className="amazon-form-input"
                         placeholder="e.g. Smart Home"
@@ -5847,7 +6025,7 @@ function App() {
                     <label>
                       Base Price (in INR ₹) <span style={{ color: '#cc0c39' }}>*</span>
                     </label>
-                    <input 
+                    <input
                       type="number"
                       step="0.01"
                       min="1"
@@ -5860,7 +6038,7 @@ function App() {
 
                   <div className="amazon-form-group">
                     <label>Available Stock Inventory</label>
-                    <input 
+                    <input
                       type="number"
                       min="0"
                       className="amazon-form-input"
@@ -5874,7 +6052,7 @@ function App() {
                   <label>
                     Primary Image URL (Direct image link, Amazon URL, or upload file) <span style={{ color: '#cc0c39' }}>*</span>
                   </label>
-                  <input 
+                  <input
                     type="text"
                     className="amazon-form-input"
                     value={editProductForm.image_url}
@@ -5893,9 +6071,9 @@ function App() {
                   <div style={{ display: 'flex', gap: '0.4rem', marginTop: '0.5rem', flexWrap: 'wrap', alignItems: 'center' }}>
                     <label className="price-go-btn" style={{ cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '0.78rem', background: '#f8fafc', border: '1px solid #cbd5e1' }}>
                       <Upload size={12} /> Upload from Device
-                      <input 
-                        type="file" 
-                        accept="image/*" 
+                      <input
+                        type="file"
+                        accept="image/*"
                         style={{ display: 'none' }}
                         onChange={(e) => {
                           const file = e.target.files?.[0];
@@ -5911,9 +6089,9 @@ function App() {
                       />
                     </label>
                     <span style={{ fontSize: '0.75rem', color: '#64748b' }}>Quick Photos:</span>
-                    <button 
-                      type="button" 
-                      className="price-go-btn" 
+                    <button
+                      type="button"
+                      className="price-go-btn"
                       style={{ fontSize: '0.74rem', background: '#fef3c7', color: '#92400e', borderColor: '#fde68a', fontWeight: 700 }}
                       onClick={() => {
                         setEditProductForm({ ...editProductForm, image_url: 'https://images.unsplash.com/photo-1511499767150-a48a237f0083?auto=format&fit=crop&w=600&q=80' });
@@ -5922,9 +6100,9 @@ function App() {
                     >
                       🕶️ Sunglasses
                     </button>
-                    <button 
-                      type="button" 
-                      className="price-go-btn" 
+                    <button
+                      type="button"
+                      className="price-go-btn"
                       style={{ fontSize: '0.74rem', background: '#eff6ff', color: '#1d4ed8', borderColor: '#bfdbfe' }}
                       onClick={() => {
                         setEditProductForm({ ...editProductForm, image_url: 'https://images.unsplash.com/photo-1523275335684-37898b6baf30?auto=format&fit=crop&w=600&q=80' });
@@ -5933,9 +6111,9 @@ function App() {
                     >
                       ⌚ Smart Watch
                     </button>
-                    <button 
-                      type="button" 
-                      className="price-go-btn" 
+                    <button
+                      type="button"
+                      className="price-go-btn"
                       style={{ fontSize: '0.74rem', background: '#eff6ff', color: '#1d4ed8', borderColor: '#bfdbfe' }}
                       onClick={() => {
                         setEditProductForm({ ...editProductForm, image_url: 'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?auto=format&fit=crop&w=600&q=80' });
@@ -5944,9 +6122,9 @@ function App() {
                     >
                       🎧 Headphones
                     </button>
-                    <button 
-                      type="button" 
-                      className="price-go-btn" 
+                    <button
+                      type="button"
+                      className="price-go-btn"
                       style={{ fontSize: '0.74rem', background: '#eff6ff', color: '#1d4ed8', borderColor: '#bfdbfe' }}
                       onClick={() => {
                         setEditProductForm({ ...editProductForm, image_url: 'https://images.unsplash.com/photo-1542291026-7eec264c27ff?auto=format&fit=crop&w=600&q=80' });
@@ -5955,9 +6133,9 @@ function App() {
                     >
                       👟 Sports Shoes
                     </button>
-                    <button 
-                      type="button" 
-                      className="price-go-btn" 
+                    <button
+                      type="button"
+                      className="price-go-btn"
                       style={{ fontSize: '0.74rem', background: '#eff6ff', color: '#1d4ed8', borderColor: '#bfdbfe' }}
                       onClick={() => {
                         setEditProductForm({ ...editProductForm, image_url: 'https://images.unsplash.com/photo-1511499767150-a48a237f0083?auto=format&fit=crop&w=600&q=80' });
@@ -5966,9 +6144,9 @@ function App() {
                     >
                       🕶️ Sunglasses
                     </button>
-                    <button 
-                      type="button" 
-                      className="price-go-btn" 
+                    <button
+                      type="button"
+                      className="price-go-btn"
                       style={{ fontSize: '0.74rem', background: '#eff6ff', color: '#1d4ed8', borderColor: '#bfdbfe' }}
                       onClick={() => {
                         setEditProductForm({ ...editProductForm, image_url: 'https://images.unsplash.com/photo-1576566588028-4147f3842f27?auto=format&fit=crop&w=600&q=80' });
@@ -5982,9 +6160,9 @@ function App() {
                   {/* Visual Image Preview */}
                   {editProductForm.image_url && (
                     <div className="product-img-preview-container" style={{ marginTop: '0.8rem' }}>
-                      <img 
-                        src={autoResolveImageUrl(editProductForm.image_url, editProductForm.title, editProductForm.category)} 
-                        alt="Product preview" 
+                      <img
+                        src={autoResolveImageUrl(editProductForm.image_url, editProductForm.title, editProductForm.category)}
+                        alt="Product preview"
                         className="product-img-preview-thumb"
                         onError={(e) => handleImageError(e, editProductForm.title, editProductForm.category, editProductForm.image_url)}
                       />
@@ -6000,7 +6178,7 @@ function App() {
                   <label>
                     Product Description & Specifications <span style={{ color: '#cc0c39' }}>*</span>
                   </label>
-                  <textarea 
+                  <textarea
                     className="amazon-form-input"
                     rows="3"
                     value={editProductForm.description}
@@ -6011,7 +6189,7 @@ function App() {
 
                 <div className="amazon-form-group">
                   <label>Gallery Image URLs (One URL per line)</label>
-                  <textarea 
+                  <textarea
                     className="amazon-form-input"
                     rows="2"
                     placeholder="https://images.unsplash.com/... (optional gallery angles)"
@@ -6021,15 +6199,15 @@ function App() {
                 </div>
 
                 <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.8rem', marginTop: '1.5rem', borderTop: '1px solid #e7e7e7', paddingTop: '1rem' }}>
-                  <button 
-                    type="button" 
-                    className="price-go-btn" 
+                  <button
+                    type="button"
+                    className="price-go-btn"
                     onClick={() => setIsEditProductModalOpen(false)}
                   >
                     Cancel
                   </button>
-                  <button 
-                    type="submit" 
+                  <button
+                    type="submit"
                     className="btn-add-product-pill"
                     disabled={isSavingProductEdit}
                     style={{ minWidth: '170px', justifyContent: 'center', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
@@ -6097,18 +6275,18 @@ function App() {
             <div className="amazon-logo-brand" style={{ fontSize: '1.2rem' }}>
               <span>bigdeal<span className="domain">.in</span></span>
             </div>
-            <button 
-              type="button" 
-              className="price-go-btn" 
+            <button
+              type="button"
+              className="price-go-btn"
               style={{ background: 'transparent', color: '#ffffff', borderColor: '#888888', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
               onClick={() => setIsCurrencyModalOpen(true)}
             >
               <Globe size={14} />
               <span>English - {currency} ({CURRENCY_CONFIG[currency]?.symbol})</span>
             </button>
-            <button 
-              type="button" 
-              className="price-go-btn" 
+            <button
+              type="button"
+              className="price-go-btn"
               style={{ background: 'transparent', color: '#ffffff', borderColor: '#888888', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
               onClick={() => setIsLocationModalOpen(true)}
             >
@@ -6117,1003 +6295,1003 @@ function App() {
             </button>
           </div>
 
-        <div className="footer-legal-links">
-          <a href="#terms">Conditions of Use & Sale</a>
-          <a href="#privacy">Privacy Notice</a>
-          <a href="#ads">Interest-Based Ads</a>
-        </div>
-        <div>© 1996-2026, BigDeal.com, Inc. or its affiliates</div>
-      </div>
-    </footer>
-
-    {/* PRODUCT COMPARISON BOTTOM FLOATING DOCK */}
-    {comparedProducts.length > 0 && (
-      <aside className="compare-bottom-dock">
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <Scale size={18} color="#febd69" />
-          <span style={{ fontWeight: 700, fontSize: '0.9rem' }}>Compare Products ({comparedProducts.length}/4)</span>
-        </div>
-        <div className="compare-items-thumbs">
-          {comparedProducts.map((p) => (
-            <div key={p.id} className="compare-thumb-box" title={p.title}>
-              <img src={p.image_url} alt={p.title} className="compare-thumb-img" />
-            </div>
-          ))}
-        </div>
-        <button
-          type="button"
-          className="compare-launch-btn"
-          onClick={() => setIsCompareModalOpen(true)}
-        >
-          <Sparkles size={14} /> Compare Now
-        </button>
-        <button
-          type="button"
-          className="compare-clear-btn"
-          onClick={clearCompareProducts}
-        >
-          Clear all
-        </button>
-      </aside>
-    )}
-
-    {/* BIG DEAL LENS (VISUAL IMAGE SEARCH) MODAL */}
-    {isLensOpen && (
-      <div className="lens-modal-overlay" onClick={() => setIsLensOpen(false)}>
-        <div className="lens-modal-sheet" onClick={(e) => e.stopPropagation()}>
-          <div className="lens-header-row">
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <div className="lens-badge-icon">
-                <Camera size={20} color="#ffffff" />
-              </div>
-              <div>
-                <h3 style={{ fontSize: '1.25rem', fontWeight: 800, margin: 0, color: '#0f172a' }}>
-                  Big Deal Lens <span className="lens-tag-pro">AI Visual Search</span>
-                </h3>
-                <span style={{ fontSize: '0.8rem', color: '#64748b' }}>Search any item by photo, screenshot, or sample image</span>
-              </div>
-            </div>
-            <button type="button" className="quickview-close-btn" onClick={() => setIsLensOpen(false)}>
-              <X size={18} />
-            </button>
+          <div className="footer-legal-links">
+            <a href="#terms">Conditions of Use & Sale</a>
+            <a href="#privacy">Privacy Notice</a>
+            <a href="#ads">Interest-Based Ads</a>
           </div>
+          <div>© 1996-2026, BigDeal.com, Inc. or its affiliates</div>
+        </div>
+      </footer>
 
-          <div className="lens-body-layout">
-            {/* Left: Upload Dropzone & Sample Presets */}
-            <div className="lens-upload-panel">
-              <label className="lens-dropzone">
-                <input 
-                  type="file" 
-                  accept="image/*" 
-                  style={{ display: 'none' }}
-                  onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (file) {
-                      const reader = new FileReader();
-                      reader.onload = (ev) => {
-                        handleRunLensSearch(ev.target.result, file.name);
-                      };
-                      reader.readAsDataURL(file);
-                    }
-                  }}
-                />
-                <div className="lens-dropzone-inner">
-                  <div className="lens-radar-icon">
-                    <Scan size={32} color="#0284c7" />
-                  </div>
-                  <strong>Upload or Drop an Image Here</strong>
-                  <span style={{ fontSize: '0.78rem', color: '#64748b' }}>Supports PNG, JPG, WEBP, or Screenshots</span>
-                  <span className="btn-lens-choose-file">
-                    <Upload size={13} style={{ marginRight: 4 }} /> Browse Device Files
-                  </span>
+      {/* PRODUCT COMPARISON BOTTOM FLOATING DOCK */}
+      {comparedProducts.length > 0 && (
+        <aside className="compare-bottom-dock">
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <Scale size={18} color="#febd69" />
+            <span style={{ fontWeight: 700, fontSize: '0.9rem' }}>Compare Products ({comparedProducts.length}/4)</span>
+          </div>
+          <div className="compare-items-thumbs">
+            {comparedProducts.map((p) => (
+              <div key={p.id} className="compare-thumb-box" title={p.title}>
+                <img src={p.image_url} alt={p.title} className="compare-thumb-img" />
+              </div>
+            ))}
+          </div>
+          <button
+            type="button"
+            className="compare-launch-btn"
+            onClick={() => setIsCompareModalOpen(true)}
+          >
+            <Sparkles size={14} /> Compare Now
+          </button>
+          <button
+            type="button"
+            className="compare-clear-btn"
+            onClick={clearCompareProducts}
+          >
+            Clear all
+          </button>
+        </aside>
+      )}
+
+      {/* BIG DEAL LENS (VISUAL IMAGE SEARCH) MODAL */}
+      {isLensOpen && (
+        <div className="lens-modal-overlay" onClick={() => setIsLensOpen(false)}>
+          <div className="lens-modal-sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="lens-header-row">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <div className="lens-badge-icon">
+                  <Camera size={20} color="#ffffff" />
                 </div>
-              </label>
+                <div>
+                  <h3 style={{ fontSize: '1.25rem', fontWeight: 800, margin: 0, color: '#0f172a' }}>
+                    Big Deal Lens <span className="lens-tag-pro">AI Visual Search</span>
+                  </h3>
+                  <span style={{ fontSize: '0.8rem', color: '#64748b' }}>Search any item by photo, screenshot, or sample image</span>
+                </div>
+              </div>
+              <button type="button" className="quickview-close-btn" onClick={() => setIsLensOpen(false)}>
+                <X size={18} />
+              </button>
+            </div>
 
-              {/* Sample Preset Visual Cards */}
-              <div style={{ marginTop: '0.8rem' }}>
-                <span style={{ fontSize: '0.82rem', fontWeight: 700, color: '#334155', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                  <Sparkles size={13} color="#f59e0b" /> Or Click a Sample Photo:
-                </span>
-                <div className="lens-preset-grid">
-                  {LENS_SAMPLE_PRESETS.map((preset, idx) => (
-                    <div 
-                      key={idx} 
-                      className={`lens-preset-card ${lensSelectedImg === preset.image ? 'active' : ''}`}
-                      onClick={() => handleRunLensSearch(preset.image, preset.category)}
-                    >
-                      <img src={preset.image} alt={preset.label} className="lens-preset-thumb" />
-                      <div className="lens-preset-info">
-                        <strong>{preset.label}</strong>
-                        <span>{preset.tag}</span>
+            <div className="lens-body-layout">
+              {/* Left: Upload Dropzone & Sample Presets */}
+              <div className="lens-upload-panel">
+                <label className="lens-dropzone">
+                  <input
+                    type="file"
+                    accept="image/*"
+                    style={{ display: 'none' }}
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) {
+                        const reader = new FileReader();
+                        reader.onload = (ev) => {
+                          handleRunLensSearch(ev.target.result, file.name);
+                        };
+                        reader.readAsDataURL(file);
+                      }
+                    }}
+                  />
+                  <div className="lens-dropzone-inner">
+                    <div className="lens-radar-icon">
+                      <Scan size={32} color="#0284c7" />
+                    </div>
+                    <strong>Upload or Drop an Image Here</strong>
+                    <span style={{ fontSize: '0.78rem', color: '#64748b' }}>Supports PNG, JPG, WEBP, or Screenshots</span>
+                    <span className="btn-lens-choose-file">
+                      <Upload size={13} style={{ marginRight: 4 }} /> Browse Device Files
+                    </span>
+                  </div>
+                </label>
+
+                {/* Sample Preset Visual Cards */}
+                <div style={{ marginTop: '0.8rem' }}>
+                  <span style={{ fontSize: '0.82rem', fontWeight: 700, color: '#334155', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                    <Sparkles size={13} color="#f59e0b" /> Or Click a Sample Photo:
+                  </span>
+                  <div className="lens-preset-grid">
+                    {LENS_SAMPLE_PRESETS.map((preset, idx) => (
+                      <div
+                        key={idx}
+                        className={`lens-preset-card ${lensSelectedImg === preset.image ? 'active' : ''}`}
+                        onClick={() => handleRunLensSearch(preset.image, preset.category)}
+                      >
+                        <img src={preset.image} alt={preset.label} className="lens-preset-thumb" />
+                        <div className="lens-preset-info">
+                          <strong>{preset.label}</strong>
+                          <span>{preset.tag}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Right: Scanning State & Matched Results */}
+              <div className="lens-results-panel">
+                {lensSelectedImg ? (
+                  <>
+                    {/* Active Scanned Preview */}
+                    <div className="lens-active-scan-box">
+                      <div className="lens-preview-img-wrap">
+                        <img src={lensSelectedImg} alt="Scanned Target" className="lens-preview-img" />
+                        {isLensScanning && <div className="lens-scanning-laser-line"></div>}
+                      </div>
+
+                      <div className="lens-scan-details">
+                        {isLensScanning ? (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                            <span style={{ color: '#0284c7', fontWeight: 700, fontSize: '0.88rem', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                              <RefreshCw size={14} className="spin-animate" /> Scanning visual contours & textures...
+                            </span>
+                            <span style={{ fontSize: '0.78rem', color: '#64748b' }}>Matching against store inventory & color spectrums</span>
+                          </div>
+                        ) : (
+                          <div>
+                            <div style={{ fontSize: '0.72rem', color: '#16a34a', fontWeight: 800, textTransform: 'uppercase' }}>
+                              ✓ Visual Recognition Complete
+                            </div>
+                            <strong style={{ fontSize: '0.92rem', color: '#0f172a' }}>{lensDetectedTag}</strong>
+                            <div style={{ fontSize: '0.78rem', color: '#64748b', marginTop: '2px' }}>
+                              Ranked by visual similarity, silhouette matching & category relevance.
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </div>
-                  ))}
-                </div>
-              </div>
-            </div>
 
-            {/* Right: Scanning State & Matched Results */}
-            <div className="lens-results-panel">
-              {lensSelectedImg ? (
-                <>
-                  {/* Active Scanned Preview */}
-                  <div className="lens-active-scan-box">
-                    <div className="lens-preview-img-wrap">
-                      <img src={lensSelectedImg} alt="Scanned Target" className="lens-preview-img" />
-                      {isLensScanning && <div className="lens-scanning-laser-line"></div>}
-                    </div>
+                    {/* Results List */}
+                    {!isLensScanning && (
+                      <div className="lens-matches-scroll">
+                        <h4 style={{ fontSize: '0.92rem', margin: '0.6rem 0 0.4rem', color: '#334155' }}>
+                          Top Matching Products ({lensMatches.length})
+                        </h4>
+                        <div className="lens-matches-grid">
+                          {lensMatches.map((item) => (
+                            <div key={item.id} className="lens-match-card">
+                              <div className="lens-match-top-badge">
+                                <span className="lens-match-pct-pill">{item.matchScore}% Match</span>
+                                <span className="lens-match-tag-pill">{item.visualTags}</span>
+                              </div>
 
-                    <div className="lens-scan-details">
-                      {isLensScanning ? (
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                          <span style={{ color: '#0284c7', fontWeight: 700, fontSize: '0.88rem', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                            <RefreshCw size={14} className="spin-animate" /> Scanning visual contours & textures...
-                          </span>
-                          <span style={{ fontSize: '0.78rem', color: '#64748b' }}>Matching against store inventory & color spectrums</span>
-                        </div>
-                      ) : (
-                        <div>
-                          <div style={{ fontSize: '0.72rem', color: '#16a34a', fontWeight: 800, textTransform: 'uppercase' }}>
-                            ✓ Visual Recognition Complete
-                          </div>
-                          <strong style={{ fontSize: '0.92rem', color: '#0f172a' }}>{lensDetectedTag}</strong>
-                          <div style={{ fontSize: '0.78rem', color: '#64748b', marginTop: '2px' }}>
-                            Ranked by visual similarity, silhouette matching & category relevance.
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Results List */}
-                  {!isLensScanning && (
-                    <div className="lens-matches-scroll">
-                      <h4 style={{ fontSize: '0.92rem', margin: '0.6rem 0 0.4rem', color: '#334155' }}>
-                        Top Matching Products ({lensMatches.length})
-                      </h4>
-                      <div className="lens-matches-grid">
-                        {lensMatches.map((item) => (
-                          <div key={item.id} className="lens-match-card">
-                            <div className="lens-match-top-badge">
-                              <span className="lens-match-pct-pill">{item.matchScore}% Match</span>
-                              <span className="lens-match-tag-pill">{item.visualTags}</span>
-                            </div>
-
-                            <div className="lens-match-img-wrap" onClick={() => {
-                              openProductDetails(item);
-                              setIsLensOpen(false);
-                            }}>
-                              <img src={item.image_url} alt={item.title} className="lens-match-img" />
-                            </div>
-
-                            <div className="lens-match-body">
-                              <h5 className="lens-match-title" onClick={() => {
+                              <div className="lens-match-img-wrap" onClick={() => {
                                 openProductDetails(item);
                                 setIsLensOpen(false);
                               }}>
-                                {item.title}
-                              </h5>
-                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '4px' }}>
-                                <strong style={{ color: 'var(--amazon-price-red)', fontSize: '0.95rem' }}>
-                                  {formatCurrency(item.price)}
-                                </strong>
-                                <span style={{ fontSize: '0.75rem', color: '#64748b' }}>{renderStars(item.average_rating || 4.5, 11)}</span>
+                                <img src={item.image_url} alt={item.title} className="lens-match-img" />
                               </div>
 
-                              <div style={{ display: 'flex', gap: '5px', marginTop: '6px' }}>
-                                <button 
-                                  type="button" 
-                                  className="amazon-yellow-btn" 
-                                  style={{ flex: 1, padding: '4px 8px', fontSize: '0.78rem', fontWeight: 700 }}
-                                  onClick={() => {
-                                    addToCart(item);
-                                    showToast(`Added ${item.title.slice(0, 18)}... to cart!`, 'success');
-                                  }}
-                                >
-                                  + Add to Cart
-                                </button>
-                                <button 
-                                  type="button" 
-                                  className="price-go-btn"
-                                  style={{ padding: '4px 8px', fontSize: '0.78rem' }}
-                                  onClick={() => {
-                                    openProductDetails(item);
-                                    setIsLensOpen(false);
-                                  }}
-                                >
-                                  Inspect
-                                </button>
+                              <div className="lens-match-body">
+                                <h5 className="lens-match-title" onClick={() => {
+                                  openProductDetails(item);
+                                  setIsLensOpen(false);
+                                }}>
+                                  {item.title}
+                                </h5>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '4px' }}>
+                                  <strong style={{ color: 'var(--amazon-price-red)', fontSize: '0.95rem' }}>
+                                    {formatCurrency(item.price)}
+                                  </strong>
+                                  <span style={{ fontSize: '0.75rem', color: '#64748b' }}>{renderStars(item.average_rating || 4.5, 11)}</span>
+                                </div>
+
+                                <div style={{ display: 'flex', gap: '5px', marginTop: '6px' }}>
+                                  <button
+                                    type="button"
+                                    className="amazon-yellow-btn"
+                                    style={{ flex: 1, padding: '4px 8px', fontSize: '0.78rem', fontWeight: 700 }}
+                                    onClick={() => {
+                                      addToCart(item);
+                                      showToast(`Added ${item.title.slice(0, 18)}... to cart!`, 'success');
+                                    }}
+                                  >
+                                    + Add to Cart
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="price-go-btn"
+                                    style={{ padding: '4px 8px', fontSize: '0.78rem' }}
+                                    onClick={() => {
+                                      openProductDetails(item);
+                                      setIsLensOpen(false);
+                                    }}
+                                  >
+                                    Inspect
+                                  </button>
+                                </div>
                               </div>
                             </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </>
-              ) : (
-                /* Empty state */
-                <div className="lens-empty-prompt">
-                  <Scan size={48} strokeWidth={1.5} color="#94a3b8" />
-                  <h4 style={{ margin: '0.6rem 0 0.2rem', color: '#334155' }}>Select or Upload an Image to Start</h4>
-                  <p style={{ fontSize: '0.82rem', color: '#64748b', maxWidth: '280px', margin: 0 }}>
-                    Big Deal Lens automatically extracts shapes, colors, and product classes to find identical and similar items instantly.
-                  </p>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      </div>
-    )}
-
-    {/* SIDE-BY-SIDE PRODUCT COMPARISON MODAL */}
-    {isCompareModalOpen && (
-      <div className="compare-modal-overlay" onClick={() => setIsCompareModalOpen(false)}>
-        <div className="compare-modal-box" onClick={(e) => e.stopPropagation()}>
-          <div className="compare-modal-header">
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <Scale size={20} color="#2563eb" />
-              <h3 style={{ fontSize: '1.25rem', fontWeight: 700, margin: 0 }}>Side-by-Side Product Comparison Matrix</h3>
-            </div>
-            <button 
-              type="button" 
-              className="quickview-close-btn" 
-              onClick={() => setIsCompareModalOpen(false)}
-            >
-              <X size={20} />
-            </button>
-          </div>
-
-          <div className="compare-matrix-table-wrap">
-            <table className="compare-table">
-              <thead>
-                <tr>
-                  <th className="compare-row-header">Feature</th>
-                  {comparedProducts.map((prod) => (
-                    <th key={prod.id} style={{ minWidth: '220px', maxWidth: '260px' }}>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                        <img 
-                          src={prod.image_url} 
-                          alt={prod.title} 
-                          style={{ height: '140px', objectFit: 'contain', background: '#f8fafc', borderRadius: '8px', padding: '6px' }} 
-                        />
-                        <span style={{ fontWeight: 700, fontSize: '0.92rem', lineHeight: 1.3 }}>{prod.title}</span>
-                        <div style={{ display: 'flex', gap: '6px', marginTop: '4px' }}>
-                          <button
-                            type="button"
-                            className="amazon-yellow-btn"
-                            style={{ flex: 1, padding: '0.4rem 0.6rem', fontSize: '0.82rem' }}
-                            onClick={() => {
-                              addToCart(prod);
-                              showToast(`Added ${prod.title.slice(0, 20)}... to cart`, 'success');
-                            }}
-                          >
-                            Add to Cart
-                          </button>
-                          <button
-                            type="button"
-                            className="price-go-btn"
-                            style={{ padding: '0.4rem 0.6rem' }}
-                            onClick={() => toggleCompareProduct(prod)}
-                            title="Remove from comparison"
-                          >
-                            <Trash2 size={14} color="#ef4444" />
-                          </button>
-                        </div>
-                      </div>
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td className="compare-row-header">Price</td>
-                  {comparedProducts.map((p) => (
-                    <td key={p.id}>
-                      <strong style={{ fontSize: '1.2rem', color: 'var(--amazon-price-red)' }}>
-                        {formatCurrency(p.price)}
-                      </strong>
-                      <div style={{ fontSize: '0.78rem', color: '#565959' }}>Inclusive of all taxes</div>
-                    </td>
-                  ))}
-                </tr>
-
-                <tr>
-                  <td className="compare-row-header">Customer Rating</td>
-                  {comparedProducts.map((p) => (
-                    <td key={p.id}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                        {renderStars(p.average_rating || 4.5)}
-                        <span style={{ fontWeight: 700, fontSize: '0.85rem' }}>{p.average_rating || 4.5}</span>
-                      </div>
-                      <span style={{ fontSize: '0.78rem', color: 'var(--amazon-link)' }}>
-                        ({p.reviews_count || 120} verified reviews)
-                      </span>
-                    </td>
-                  ))}
-                </tr>
-
-                <tr>
-                  <td className="compare-row-header">Department</td>
-                  {comparedProducts.map((p) => (
-                    <td key={p.id}>
-                      <span style={{ background: '#f1f5f9', padding: '2px 8px', borderRadius: '12px', fontSize: '0.82rem', fontWeight: 600 }}>
-                        {p.category || 'General'}
-                      </span>
-                    </td>
-                  ))}
-                </tr>
-
-                <tr>
-                  <td className="compare-row-header">Stock Status</td>
-                  {comparedProducts.map((p) => (
-                    <td key={p.id}>
-                      {(p.stock || 10) > 0 ? (
-                        <span style={{ color: '#16a34a', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '4px' }}>
-                          <CheckCircle2 size={14} /> In Stock ({p.stock || 10} units)
-                        </span>
-                      ) : (
-                        <span style={{ color: '#ef4444', fontWeight: 700 }}>Out of Stock</span>
-                      )}
-                    </td>
-                  ))}
-                </tr>
-
-                <tr>
-                  <td className="compare-row-header">Delivery Speed</td>
-                  {comparedProducts.map((p) => (
-                    <td key={p.id}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#00a8e1', fontWeight: 800, fontSize: '0.85rem' }}>
-                        <Truck size={14} /> PRIME FREE
-                      </div>
-                      <span style={{ fontSize: '0.78rem', color: '#475569' }}>Guaranteed 24-hr Doorstep Delivery</span>
-                    </td>
-                  ))}
-                </tr>
-
-                <tr>
-                  <td className="compare-row-header">Key Specifications</td>
-                  {comparedProducts.map((p) => {
-                    const specs = PRODUCT_SPECS[p.category] || PRODUCT_SPECS["Default"];
-                    return (
-                      <td key={p.id}>
-                        <ul style={{ listStyle: 'none', padding: 0, margin: 0, fontSize: '0.82rem', display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                          {Object.entries(specs).map(([k, v]) => (
-                            <li key={k}>
-                              <strong style={{ color: '#475569' }}>{k}:</strong> {v}
-                            </li>
                           ))}
-                        </ul>
-                      </td>
-                    );
-                  })}
-                </tr>
-
-                <tr>
-                  <td className="compare-row-header">Return Policy</td>
-                  {comparedProducts.map((p) => (
-                    <td key={p.id} style={{ fontSize: '0.82rem', color: '#475569' }}>
-                      <RotateCcw size={13} style={{ verticalAlign: 'middle', marginRight: 4, color: '#059669' }} />
-                      7 Days Replacement / 30 Days Full Refund Guarantee
-                    </td>
-                  ))}
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-    )}
-
-    {/* GAMIFIED SPIN & WIN LUCKY WHEEL MODAL */}
-    {isSpinWheelOpen && (
-      <div className="spin-wheel-overlay" onClick={() => !isSpinning && setIsSpinWheelOpen(false)}>
-        <div className="spin-wheel-modal" onClick={(e) => e.stopPropagation()}>
-          <button 
-            type="button" 
-            className="spin-wheel-close" 
-            onClick={() => !isSpinning && setIsSpinWheelOpen(false)}
-            disabled={isSpinning}
-          >
-            <X size={18} />
-          </button>
-
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '0.4rem' }}>
-            <PartyPopper size={24} color="#f59e0b" />
-            <h2 style={{ fontSize: '1.5rem', fontWeight: 800, margin: 0 }}>Big Deal Lucky Spin & Win</h2>
-          </div>
-          <p style={{ fontSize: '0.88rem', color: '#9ca3af', maxWidth: '380px' }}>
-            Spin the wheel to unlock guaranteed checkout coupon codes & free Prime express upgrades!
-          </p>
-
-          <div className="wheel-container-relative">
-            <div className="wheel-pointer"></div>
-            
-            {/* SVG Wheel Visual */}
-            <svg 
-              className="wheel-canvas" 
-              viewBox="0 0 300 300"
-              style={{ transform: `rotate(${wheelRotation}deg)` }}
-            >
-              {WHEEL_PRIZES.map((prize, idx) => {
-                const angle = 360 / WHEEL_PRIZES.length;
-                const startAngle = idx * angle;
-                const endAngle = (idx + 1) * angle;
-                const startRad = (startAngle - 90) * (Math.PI / 180);
-                const endRad = (endAngle - 90) * (Math.PI / 180);
-                const x1 = 150 + 140 * Math.cos(startRad);
-                const y1 = 150 + 140 * Math.sin(startRad);
-                const x2 = 150 + 140 * Math.cos(endRad);
-                const y2 = 150 + 140 * Math.sin(endRad);
-                const textAngle = startAngle + angle / 2;
-
-                return (
-                  <g key={prize.text}>
-                    <path
-                      d={`M 150 150 L ${x1} ${y1} A 140 140 0 0 1 ${x2} ${y2} Z`}
-                      fill={prize.color}
-                      stroke="#111827"
-                      strokeWidth="2"
-                    />
-                    <text
-                      x="150"
-                      y="45"
-                      fill="#ffffff"
-                      fontSize="10"
-                      fontWeight="800"
-                      textAnchor="middle"
-                      transform={`rotate(${textAngle}, 150, 150)`}
-                    >
-                      {prize.text}
-                    </text>
-                  </g>
-                );
-              })}
-            </svg>
-
-            <div className="wheel-center-hub" onClick={spinWheel} style={{ cursor: isSpinning ? 'not-allowed' : 'pointer' }}>
-              SPIN
-            </div>
-          </div>
-
-          <button
-            type="button"
-            className="spin-trigger-btn"
-            onClick={spinWheel}
-            disabled={isSpinning}
-          >
-            <Zap size={18} />
-            <span>{isSpinning ? 'SPINNING THE WHEEL...' : 'SPIN THE WHEEL NOW'}</span>
-          </button>
-
-          {/* Won Reward Display */}
-          {wonReward && (
-            <div className="win-celebration-box">
-              <div style={{ fontSize: '1.2rem', fontWeight: 800, color: '#10b981', marginBottom: '4px' }}>
-                🎉 You Won {wonReward.text}!
-              </div>
-              <p style={{ fontSize: '0.85rem', color: '#cbd5e1', marginBottom: '0.8rem' }}>
-                Use coupon code <code style={{ background: '#064e3b', color: '#34d399', padding: '2px 8px', borderRadius: '4px', fontWeight: 700 }}>{wonReward.code}</code> at checkout for instant savings.
-              </p>
-              <button
-                type="button"
-                className="amazon-yellow-btn"
-                style={{ width: '100%', fontWeight: 800, fontSize: '0.92rem' }}
-                onClick={claimRewardPromo}
-              >
-                1-Click Apply Code to Cart & Shop
-              </button>
-            </div>
-          )}
-        </div>
-      </div>
-    )}
-
-    {/* AI SHOPPING ASSISTANT ("BIGDEAL GENIUS AI") FLOATING FAB & DRAWER */}
-    <button
-      type="button"
-      className="ai-assistant-fab"
-      onClick={() => {
-        setIsAIOpen((prev) => !prev);
-        playAudioChime('click', soundEnabled);
-      }}
-      title="Chat with BigDeal Genius AI Shopping Assistant"
-    >
-      <Bot size={18} />
-      <span>Genius AI</span>
-      <span className="ai-fab-badge">PRO</span>
-    </button>
-
-    {isAIOpen && (
-      <div className="ai-assistant-drawer">
-        <div className="ai-drawer-header">
-          <div className="ai-header-title">
-            <Bot size={18} color="#febd69" />
-            <div>
-              <div>BigDeal Genius AI</div>
-              <div className="ai-header-sub">Smart Shopping Companion</div>
-            </div>
-          </div>
-          <button 
-            type="button" 
-            onClick={() => setIsAIOpen(false)}
-            style={{ color: '#ffffff', background: 'transparent', border: 'none', cursor: 'pointer' }}
-          >
-            <X size={18} />
-          </button>
-        </div>
-
-        <div className="ai-messages-container">
-          {aiMessages.map((msg) => (
-            <div key={msg.id} className={`ai-msg ${msg.sender}`}>
-              <div className="ai-bubble">
-                {msg.text}
-
-                {/* Render Embedded Recommendations if any */}
-                {msg.recommendations && msg.recommendations.length > 0 && (
-                  <div style={{ marginTop: '8px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                    {msg.recommendations.map((rec) => (
-                      <div key={rec.id} className="ai-card-recommend">
-                        <img src={rec.image_url} alt={rec.title} className="ai-card-thumb" />
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontSize: '0.82rem', fontWeight: 700, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                            {rec.title}
-                          </div>
-                          <div style={{ fontSize: '0.82rem', color: 'var(--amazon-price-red)', fontWeight: 700 }}>
-                            {formatCurrency(rec.price)}
-                          </div>
                         </div>
-                        <button
-                          type="button"
-                          className="amazon-yellow-btn"
-                          style={{ padding: '3px 8px', fontSize: '0.75rem', whiteSpace: 'nowrap' }}
-                          onClick={() => {
-                            addToCart(rec);
-                            showToast(`Added ${rec.title.slice(0, 18)}... to cart`, 'success');
-                          }}
-                        >
-                          + Cart
-                        </button>
                       </div>
-                    ))}
+                    )}
+                  </>
+                ) : (
+                  /* Empty state */
+                  <div className="lens-empty-prompt">
+                    <Scan size={48} strokeWidth={1.5} color="#94a3b8" />
+                    <h4 style={{ margin: '0.6rem 0 0.2rem', color: '#334155' }}>Select or Upload an Image to Start</h4>
+                    <p style={{ fontSize: '0.82rem', color: '#64748b', maxWidth: '280px', margin: 0 }}>
+                      Big Deal Lens automatically extracts shapes, colors, and product classes to find identical and similar items instantly.
+                    </p>
                   </div>
                 )}
               </div>
             </div>
-          ))}
+          </div>
+        </div>
+      )}
 
-          {isAiTyping && (
-            <div className="ai-msg bot">
-              <div className="ai-bubble" style={{ display: 'flex', alignItems: 'center', gap: '4px', fontStyle: 'italic', color: '#64748b' }}>
-                <Sparkles size={14} color="#f59e0b" />
-                <span>Genius AI is analyzing catalog deals...</span>
+      {/* SIDE-BY-SIDE PRODUCT COMPARISON MODAL */}
+      {isCompareModalOpen && (
+        <div className="compare-modal-overlay" onClick={() => setIsCompareModalOpen(false)}>
+          <div className="compare-modal-box" onClick={(e) => e.stopPropagation()}>
+            <div className="compare-modal-header">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Scale size={20} color="#2563eb" />
+                <h3 style={{ fontSize: '1.25rem', fontWeight: 700, margin: 0 }}>Side-by-Side Product Comparison Matrix</h3>
+              </div>
+              <button
+                type="button"
+                className="quickview-close-btn"
+                onClick={() => setIsCompareModalOpen(false)}
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="compare-matrix-table-wrap">
+              <table className="compare-table">
+                <thead>
+                  <tr>
+                    <th className="compare-row-header">Feature</th>
+                    {comparedProducts.map((prod) => (
+                      <th key={prod.id} style={{ minWidth: '220px', maxWidth: '260px' }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                          <img
+                            src={prod.image_url}
+                            alt={prod.title}
+                            style={{ height: '140px', objectFit: 'contain', background: '#f8fafc', borderRadius: '8px', padding: '6px' }}
+                          />
+                          <span style={{ fontWeight: 700, fontSize: '0.92rem', lineHeight: 1.3 }}>{prod.title}</span>
+                          <div style={{ display: 'flex', gap: '6px', marginTop: '4px' }}>
+                            <button
+                              type="button"
+                              className="amazon-yellow-btn"
+                              style={{ flex: 1, padding: '0.4rem 0.6rem', fontSize: '0.82rem' }}
+                              onClick={() => {
+                                addToCart(prod);
+                                showToast(`Added ${prod.title.slice(0, 20)}... to cart`, 'success');
+                              }}
+                            >
+                              Add to Cart
+                            </button>
+                            <button
+                              type="button"
+                              className="price-go-btn"
+                              style={{ padding: '0.4rem 0.6rem' }}
+                              onClick={() => toggleCompareProduct(prod)}
+                              title="Remove from comparison"
+                            >
+                              <Trash2 size={14} color="#ef4444" />
+                            </button>
+                          </div>
+                        </div>
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td className="compare-row-header">Price</td>
+                    {comparedProducts.map((p) => (
+                      <td key={p.id}>
+                        <strong style={{ fontSize: '1.2rem', color: 'var(--amazon-price-red)' }}>
+                          {formatCurrency(p.price)}
+                        </strong>
+                        <div style={{ fontSize: '0.78rem', color: '#565959' }}>Inclusive of all taxes</div>
+                      </td>
+                    ))}
+                  </tr>
+
+                  <tr>
+                    <td className="compare-row-header">Customer Rating</td>
+                    {comparedProducts.map((p) => (
+                      <td key={p.id}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                          {renderStars(p.average_rating || 4.5)}
+                          <span style={{ fontWeight: 700, fontSize: '0.85rem' }}>{p.average_rating || 4.5}</span>
+                        </div>
+                        <span style={{ fontSize: '0.78rem', color: 'var(--amazon-link)' }}>
+                          ({p.reviews_count || 120} verified reviews)
+                        </span>
+                      </td>
+                    ))}
+                  </tr>
+
+                  <tr>
+                    <td className="compare-row-header">Department</td>
+                    {comparedProducts.map((p) => (
+                      <td key={p.id}>
+                        <span style={{ background: '#f1f5f9', padding: '2px 8px', borderRadius: '12px', fontSize: '0.82rem', fontWeight: 600 }}>
+                          {p.category || 'General'}
+                        </span>
+                      </td>
+                    ))}
+                  </tr>
+
+                  <tr>
+                    <td className="compare-row-header">Stock Status</td>
+                    {comparedProducts.map((p) => (
+                      <td key={p.id}>
+                        {(p.stock || 10) > 0 ? (
+                          <span style={{ color: '#16a34a', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '4px' }}>
+                            <CheckCircle2 size={14} /> In Stock ({p.stock || 10} units)
+                          </span>
+                        ) : (
+                          <span style={{ color: '#ef4444', fontWeight: 700 }}>Out of Stock</span>
+                        )}
+                      </td>
+                    ))}
+                  </tr>
+
+                  <tr>
+                    <td className="compare-row-header">Delivery Speed</td>
+                    {comparedProducts.map((p) => (
+                      <td key={p.id}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#00a8e1', fontWeight: 800, fontSize: '0.85rem' }}>
+                          <Truck size={14} /> PRIME FREE
+                        </div>
+                        <span style={{ fontSize: '0.78rem', color: '#475569' }}>Guaranteed 24-hr Doorstep Delivery</span>
+                      </td>
+                    ))}
+                  </tr>
+
+                  <tr>
+                    <td className="compare-row-header">Key Specifications</td>
+                    {comparedProducts.map((p) => {
+                      const specs = PRODUCT_SPECS[p.category] || PRODUCT_SPECS["Default"];
+                      return (
+                        <td key={p.id}>
+                          <ul style={{ listStyle: 'none', padding: 0, margin: 0, fontSize: '0.82rem', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                            {Object.entries(specs).map(([k, v]) => (
+                              <li key={k}>
+                                <strong style={{ color: '#475569' }}>{k}:</strong> {v}
+                              </li>
+                            ))}
+                          </ul>
+                        </td>
+                      );
+                    })}
+                  </tr>
+
+                  <tr>
+                    <td className="compare-row-header">Return Policy</td>
+                    {comparedProducts.map((p) => (
+                      <td key={p.id} style={{ fontSize: '0.82rem', color: '#475569' }}>
+                        <RotateCcw size={13} style={{ verticalAlign: 'middle', marginRight: 4, color: '#059669' }} />
+                        7 Days Replacement / 30 Days Full Refund Guarantee
+                      </td>
+                    ))}
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* GAMIFIED SPIN & WIN LUCKY WHEEL MODAL */}
+      {isSpinWheelOpen && (
+        <div className="spin-wheel-overlay" onClick={() => !isSpinning && setIsSpinWheelOpen(false)}>
+          <div className="spin-wheel-modal" onClick={(e) => e.stopPropagation()}>
+            <button
+              type="button"
+              className="spin-wheel-close"
+              onClick={() => !isSpinning && setIsSpinWheelOpen(false)}
+              disabled={isSpinning}
+            >
+              <X size={18} />
+            </button>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '0.4rem' }}>
+              <PartyPopper size={24} color="#f59e0b" />
+              <h2 style={{ fontSize: '1.5rem', fontWeight: 800, margin: 0 }}>Big Deal Lucky Spin & Win</h2>
+            </div>
+            <p style={{ fontSize: '0.88rem', color: '#9ca3af', maxWidth: '380px' }}>
+              Spin the wheel to unlock guaranteed checkout coupon codes & free Prime express upgrades!
+            </p>
+
+            <div className="wheel-container-relative">
+              <div className="wheel-pointer"></div>
+
+              {/* SVG Wheel Visual */}
+              <svg
+                className="wheel-canvas"
+                viewBox="0 0 300 300"
+                style={{ transform: `rotate(${wheelRotation}deg)` }}
+              >
+                {WHEEL_PRIZES.map((prize, idx) => {
+                  const angle = 360 / WHEEL_PRIZES.length;
+                  const startAngle = idx * angle;
+                  const endAngle = (idx + 1) * angle;
+                  const startRad = (startAngle - 90) * (Math.PI / 180);
+                  const endRad = (endAngle - 90) * (Math.PI / 180);
+                  const x1 = 150 + 140 * Math.cos(startRad);
+                  const y1 = 150 + 140 * Math.sin(startRad);
+                  const x2 = 150 + 140 * Math.cos(endRad);
+                  const y2 = 150 + 140 * Math.sin(endRad);
+                  const textAngle = startAngle + angle / 2;
+
+                  return (
+                    <g key={prize.text}>
+                      <path
+                        d={`M 150 150 L ${x1} ${y1} A 140 140 0 0 1 ${x2} ${y2} Z`}
+                        fill={prize.color}
+                        stroke="#111827"
+                        strokeWidth="2"
+                      />
+                      <text
+                        x="150"
+                        y="45"
+                        fill="#ffffff"
+                        fontSize="10"
+                        fontWeight="800"
+                        textAnchor="middle"
+                        transform={`rotate(${textAngle}, 150, 150)`}
+                      >
+                        {prize.text}
+                      </text>
+                    </g>
+                  );
+                })}
+              </svg>
+
+              <div className="wheel-center-hub" onClick={spinWheel} style={{ cursor: isSpinning ? 'not-allowed' : 'pointer' }}>
+                SPIN
               </div>
             </div>
-          )}
-        </div>
 
-        {/* Quick-Prompt Preset Pills */}
-        <div className="ai-prompts-row">
-          {[
-            "Deals under ₹2,000",
-            "Best audio & ANC headphones",
-            "Ergonomic work setup",
-            "Smart fitness watches",
-            "Top customer favorites"
-          ].map((prompt) => (
             <button
-              key={prompt}
               type="button"
-              className="ai-prompt-pill"
-              onClick={() => handleAiSend(prompt)}
+              className="spin-trigger-btn"
+              onClick={spinWheel}
+              disabled={isSpinning}
             >
-              {prompt}
+              <Zap size={18} />
+              <span>{isSpinning ? 'SPINNING THE WHEEL...' : 'SPIN THE WHEEL NOW'}</span>
             </button>
-          ))}
+
+            {/* Won Reward Display */}
+            {wonReward && (
+              <div className="win-celebration-box">
+                <div style={{ fontSize: '1.2rem', fontWeight: 800, color: '#10b981', marginBottom: '4px' }}>
+                  🎉 You Won {wonReward.text}!
+                </div>
+                <p style={{ fontSize: '0.85rem', color: '#cbd5e1', marginBottom: '0.8rem' }}>
+                  Use coupon code <code style={{ background: '#064e3b', color: '#34d399', padding: '2px 8px', borderRadius: '4px', fontWeight: 700 }}>{wonReward.code}</code> at checkout for instant savings.
+                </p>
+                <button
+                  type="button"
+                  className="amazon-yellow-btn"
+                  style={{ width: '100%', fontWeight: 800, fontSize: '0.92rem' }}
+                  onClick={claimRewardPromo}
+                >
+                  1-Click Apply Code to Cart & Shop
+                </button>
+              </div>
+            )}
+          </div>
         </div>
+      )}
 
-        {/* AI Input Form */}
-        <form 
-          className="ai-input-form" 
-          onSubmit={(e) => {
-            e.preventDefault();
-            handleAiSend();
-          }}
-        >
-          <input
-            type="text"
-            className="ai-chat-input"
-            placeholder="Ask Genius AI anything..."
-            value={aiInput}
-            onChange={(e) => setAiInput(e.target.value)}
-          />
-          <button type="submit" className="ai-send-btn" disabled={!aiInput.trim() || isAiTyping}>
-            <Send size={15} />
-          </button>
-        </form>
-      </div>
-    )}
+      {/* AI SHOPPING ASSISTANT ("BIGDEAL GENIUS AI") FLOATING FAB & DRAWER */}
+      <button
+        type="button"
+        className="ai-assistant-fab"
+        onClick={() => {
+          setIsAIOpen((prev) => !prev);
+          playAudioChime('click', soundEnabled);
+        }}
+        title="Chat with BigDeal Genius AI Shopping Assistant"
+      >
+        <Bot size={18} />
+        <span>Genius AI</span>
+        <span className="ai-fab-badge">PRO</span>
+      </button>
 
-    {/* INTERACTIVE EMI & BNPL CALCULATOR MODAL */}
-    {isEmiModalOpen && (
-      <div className="emi-modal-overlay" onClick={() => setIsEmiModalOpen(false)}>
-        <div className="emi-modal-card" onClick={(e) => e.stopPropagation()}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid #e2e8f0', paddingBottom: '0.8rem' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <Calculator size={20} color="#2563eb" />
-              <h3 style={{ fontSize: '1.25rem', fontWeight: 700, margin: 0 }}>EMI Plans & Bank Offers</h3>
+      {isAIOpen && (
+        <div className="ai-assistant-drawer">
+          <div className="ai-drawer-header">
+            <div className="ai-header-title">
+              <Bot size={18} color="#febd69" />
+              <div>
+                <div>BigDeal Genius AI</div>
+                <div className="ai-header-sub">Smart Shopping Companion</div>
+              </div>
             </div>
-            <button type="button" className="quickview-close-btn" onClick={() => setIsEmiModalOpen(false)}>
+            <button
+              type="button"
+              onClick={() => setIsAIOpen(false)}
+              style={{ color: '#ffffff', background: 'transparent', border: 'none', cursor: 'pointer' }}
+            >
               <X size={18} />
             </button>
           </div>
 
-          <div style={{ margin: '1rem 0', background: '#eff6ff', padding: '0.85rem 1rem', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <div>
-              <span style={{ fontSize: '0.8rem', color: '#1e40af' }}>Product Amount:</span>
-              <div style={{ fontSize: '1.3rem', fontWeight: 800, color: '#1e3a8a' }}>
-                {formatCurrency(activeModalProduct ? activeModalProduct.price : 24999)}
+          <div className="ai-messages-container">
+            {aiMessages.map((msg) => (
+              <div key={msg.id} className={`ai-msg ${msg.sender}`}>
+                <div className="ai-bubble">
+                  {msg.text}
+
+                  {/* Render Embedded Recommendations if any */}
+                  {msg.recommendations && msg.recommendations.length > 0 && (
+                    <div style={{ marginTop: '8px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                      {msg.recommendations.map((rec) => (
+                        <div key={rec.id} className="ai-card-recommend">
+                          <img src={rec.image_url} alt={rec.title} className="ai-card-thumb" />
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: '0.82rem', fontWeight: 700, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                              {rec.title}
+                            </div>
+                            <div style={{ fontSize: '0.82rem', color: 'var(--amazon-price-red)', fontWeight: 700 }}>
+                              {formatCurrency(rec.price)}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            className="amazon-yellow-btn"
+                            style={{ padding: '3px 8px', fontSize: '0.75rem', whiteSpace: 'nowrap' }}
+                            onClick={() => {
+                              addToCart(rec);
+                              showToast(`Added ${rec.title.slice(0, 18)}... to cart`, 'success');
+                            }}
+                          >
+                            + Cart
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
-            <span style={{ fontSize: '0.78rem', background: '#dbeafe', color: '#1d4ed8', fontWeight: 700, padding: '4px 10px', borderRadius: '12px' }}>
-              No-Cost EMI Active
-            </span>
+            ))}
+
+            {isAiTyping && (
+              <div className="ai-msg bot">
+                <div className="ai-bubble" style={{ display: 'flex', alignItems: 'center', gap: '4px', fontStyle: 'italic', color: '#64748b' }}>
+                  <Sparkles size={14} color="#f59e0b" />
+                  <span>Genius AI is analyzing catalog deals...</span>
+                </div>
+              </div>
+            )}
           </div>
 
-          {/* Bank Selection Tabs */}
-          <div className="emi-bank-tabs">
-            {Object.keys(EMI_BANK_PLANS).map((b) => (
+          {/* Quick-Prompt Preset Pills */}
+          <div className="ai-prompts-row">
+            {[
+              "Deals under ₹2,000",
+              "Best audio & ANC headphones",
+              "Ergonomic work setup",
+              "Smart fitness watches",
+              "Top customer favorites"
+            ].map((prompt) => (
               <button
-                key={b}
+                key={prompt}
                 type="button"
-                className={`emi-bank-btn ${selectedEmiBank === b ? 'active' : ''}`}
-                onClick={() => setSelectedEmiBank(b)}
+                className="ai-prompt-pill"
+                onClick={() => handleAiSend(prompt)}
               >
-                {b === 'AMAZON_PAY' ? 'Big Deal Pay Later' : `${b} Bank`}
+                {prompt}
               </button>
             ))}
           </div>
 
-          {/* EMI Tenure Table */}
-          <table className="emi-tenure-table">
-            <thead>
-              <tr>
-                <th>EMI Plan</th>
-                <th>Monthly Installment</th>
-                <th>Interest Rate</th>
-                <th>Total Cost</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(EMI_BANK_PLANS[selectedEmiBank] || EMI_BANK_PLANS['HDFC']).map((plan) => {
-                const prodPrice = activeModalProduct ? activeModalProduct.price : 24999;
-                const monthlyPrincipal = prodPrice / plan.months;
-                const monthlyInterest = (prodPrice * (plan.rate / 100)) / 12;
-                const emiPerMonth = Math.round(monthlyPrincipal + monthlyInterest);
-                const totalCalculated = Math.round(emiPerMonth * plan.months);
-
-                return (
-                  <tr key={plan.months}>
-                    <td>
-                      <strong>{plan.months} Months</strong>
-                      {plan.noCost && (
-                        <span style={{ fontSize: '0.72rem', background: '#dcfce7', color: '#166534', fontWeight: 800, padding: '1px 6px', borderRadius: '8px', marginLeft: '6px' }}>
-                          NO COST
-                        </span>
-                      )}
-                    </td>
-                    <td><strong style={{ color: '#0f1111' }}>{formatCurrency(emiPerMonth)}/mo</strong></td>
-                    <td>{plan.rate === 0 ? '0% Free' : `${plan.rate}% p.a.`}</td>
-                    <td>{formatCurrency(totalCalculated)}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-
-          <div style={{ fontSize: '0.78rem', color: '#64748b', marginTop: '1rem', lineHeight: 1.5 }}>
-            *No Cost EMI is available on qualifying Credit Cards. Bank processing fees may apply as per individual bank policy.
-          </div>
-        </div>
-      </div>
-    )}
-
-    {/* BIG DEAL MINITV VIDEO SHOWCASE MODAL */}
-    {isMiniTvOpen && (
-      <div className="minitv-overlay" onClick={() => setIsMiniTvOpen(false)}>
-        <div className="minitv-player-box" onClick={(e) => e.stopPropagation()}>
-          <div style={{ padding: '0.75rem 1.25rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: '#111827', color: '#ffffff' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <Tv size={18} color="#ec4899" />
-              <strong style={{ fontSize: '1rem' }}>Big Deal miniTV Live Shopping Stream</strong>
-            </div>
-            <button type="button" className="quickview-close-btn" style={{ color: '#ffffff' }} onClick={() => setIsMiniTvOpen(false)}>
-              <X size={18} />
-            </button>
-          </div>
-
-          <div className="minitv-video-screen">
-            <img 
-              src="https://images.unsplash.com/photo-1505740420928-5e560c06d30e?auto=format&fit=crop&w=1200&q=80" 
-              alt="Video Stream" 
-              className="minitv-video-bg"
+          {/* AI Input Form */}
+          <form
+            className="ai-input-form"
+            onSubmit={(e) => {
+              e.preventDefault();
+              handleAiSend();
+            }}
+          >
+            <input
+              type="text"
+              className="ai-chat-input"
+              placeholder="Ask Genius AI anything..."
+              value={aiInput}
+              onChange={(e) => setAiInput(e.target.value)}
             />
-            
-            {/* Overlay Live Badge */}
-            <div style={{ position: 'absolute', top: '15px', left: '15px', display: 'flex', gap: '8px' }}>
-              <span className="minitv-live-tag">● LIVE DEMO</span>
-              <span style={{ background: 'rgba(0,0,0,0.65)', color: '#ffffff', fontSize: '0.75rem', padding: '2px 8px', borderRadius: '4px', fontWeight: 600 }}>
-                👥 1,842 watching
-              </span>
-            </div>
-
-            {/* Floating Buy Now / Add to Cart Card */}
-            {miniTvProduct && (
-              <div className="minitv-buy-card">
-                <img 
-                  src={miniTvProduct.image_url} 
-                  alt={miniTvProduct.title} 
-                  style={{ width: '48px', height: '48px', objectFit: 'contain', background: '#ffffff', borderRadius: '6px' }} 
-                />
-                <div>
-                  <div style={{ fontSize: '0.85rem', fontWeight: 700, maxWidth: '180px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    {miniTvProduct.title}
-                  </div>
-                  <div style={{ fontSize: '0.9rem', color: '#febd69', fontWeight: 800 }}>
-                    {formatCurrency(miniTvProduct.price)}
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  className="amazon-yellow-btn"
-                  style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem', fontWeight: 700 }}
-                  onClick={() => {
-                    addToCart(miniTvProduct);
-                    showToast(`Added ${miniTvProduct.title.slice(0, 18)}... to cart!`, 'success');
-                  }}
-                >
-                  Buy in Stream
-                </button>
-              </div>
-            )}
-
-            {/* In-Video Overlay Controls */}
-            <div className="minitv-overlay-controls">
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', color: '#ffffff' }}>
-                <button 
-                  type="button" 
-                  onClick={() => setIsPlayingMiniTv(!isPlayingMiniTv)}
-                  style={{ color: '#ffffff', background: 'transparent', border: 'none', cursor: 'pointer' }}
-                >
-                  {isPlayingMiniTv ? <Pause size={20} /> : <Play size={20} />}
-                </button>
-                <span style={{ fontSize: '0.82rem', fontWeight: 600 }}>Stream: "Hands-on Unboxing & Sound Quality Review"</span>
-              </div>
-              <button 
-                type="button" 
-                className="price-go-btn"
-                style={{ background: 'rgba(255,255,255,0.2)', color: '#ffffff', borderColor: 'transparent', fontSize: '0.78rem' }}
-                onClick={() => showToast('Shared live stream link to clipboard!', 'info')}
-              >
-                <Share2 size={13} style={{ marginRight: 4 }} /> Share
-              </button>
-            </div>
-          </div>
+            <button type="submit" className="ai-send-btn" disabled={!aiInput.trim() || isAiTyping}>
+              <Send size={15} />
+            </button>
+          </form>
         </div>
-      </div>
-    )}
+      )}
 
-    {/* PRINTABLE GST TAX INVOICE MODAL */}
-    {isInvoiceModalOpen && invoiceOrder && (
-      <div className="invoice-modal-overlay" onClick={() => setIsInvoiceModalOpen(false)}>
-        <div className="invoice-sheet" onClick={(e) => e.stopPropagation()}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-            <div className="amazon-logo-brand" style={{ fontSize: '1.4rem' }}>
-              <span>bigdeal<span className="domain">.in</span></span>
-            </div>
-            <div style={{ display: 'flex', gap: '8px' }}>
-              <button 
-                type="button" 
-                className="amazon-yellow-btn" 
-                style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '0.45rem 1rem' }}
-                onClick={() => window.print()}
-              >
-                <Printer size={15} />
-                <span>Print / Download PDF</span>
-              </button>
-              <button type="button" className="quickview-close-btn" onClick={() => setIsInvoiceModalOpen(false)}>
+      {/* INTERACTIVE EMI & BNPL CALCULATOR MODAL */}
+      {isEmiModalOpen && (
+        <div className="emi-modal-overlay" onClick={() => setIsEmiModalOpen(false)}>
+          <div className="emi-modal-card" onClick={(e) => e.stopPropagation()}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid #e2e8f0', paddingBottom: '0.8rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Calculator size={20} color="#2563eb" />
+                <h3 style={{ fontSize: '1.25rem', fontWeight: 700, margin: 0 }}>EMI Plans & Bank Offers</h3>
+              </div>
+              <button type="button" className="quickview-close-btn" onClick={() => setIsEmiModalOpen(false)}>
                 <X size={18} />
               </button>
             </div>
-          </div>
 
-          <div className="invoice-header-grid">
-            <div>
-              <h2 style={{ fontSize: '1.2rem', fontWeight: 800, margin: 0 }}>Tax Invoice / Bill of Supply</h2>
-              <div style={{ fontSize: '0.82rem', color: '#4b5563', marginTop: '4px' }}>
-                <div><strong>Invoice Number:</strong> BD-IN-{invoiceOrder.order_id || '982341'}</div>
-                <div><strong>Invoice Date:</strong> {new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })}</div>
-                <div><strong>GSTIN:</strong> 29AABCB2212M1ZX • <strong>CIN:</strong> U74900KA2015PTC082000</div>
+            <div style={{ margin: '1rem 0', background: '#eff6ff', padding: '0.85rem 1rem', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div>
+                <span style={{ fontSize: '0.8rem', color: '#1e40af' }}>Product Amount:</span>
+                <div style={{ fontSize: '1.3rem', fontWeight: 800, color: '#1e3a8a' }}>
+                  {formatCurrency(activeModalProduct ? activeModalProduct.price : 24999)}
+                </div>
               </div>
-            </div>
-            <div style={{ textAlign: 'right', fontSize: '0.82rem', color: '#4b5563' }}>
-              <strong>Sold By:</strong>
-              <div>Big Deal Retail India Pvt. Ltd.</div>
-              <div>Amazon Gateway Logistics Campus</div>
-              <div>Bangalore, Karnataka - 560068</div>
-            </div>
-          </div>
-
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', background: '#f8fafc', padding: '0.85rem', borderRadius: '8px', fontSize: '0.85rem' }}>
-            <div>
-              <strong>Billing Address:</strong>
-              <div>{invoiceOrder.customer_name || 'Alex Rivera'}</div>
-              <div>{shippingData.address}</div>
-              <div>{shippingData.city}, {shippingData.state} - {shippingData.zipCode}</div>
-              <div>Phone: {shippingData.phone}</div>
-            </div>
-            <div>
-              <strong>Shipping & Delivery Details:</strong>
-              <div>Carrier: {invoiceOrder.carrier || 'Big Deal Prime Express'}</div>
-              <div>Tracking ID: <code>{invoiceOrder.tracking_number || 'BD-TRK-7749210'}</code></div>
-              <div>Place of Supply: {shippingData.state || 'Tamil Nadu'} (State Code: 33)</div>
-            </div>
-          </div>
-
-          <table className="invoice-table">
-            <thead>
-              <tr>
-                <th>Item Description</th>
-                <th>HSN</th>
-                <th>Qty</th>
-                <th>Gross (₹)</th>
-                <th>CGST (9%)</th>
-                <th>SGST (9%)</th>
-                <th>Total (₹)</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(invoiceOrder.items && invoiceOrder.items.length > 0 ? invoiceOrder.items : [
-                { title: 'AeroPulse Chrono Precision Analog Watch', price: invoiceOrder.total || 499, qty: 1 }
-              ]).map((it, idx) => {
-                const itemGross = Math.round(it.price * 0.82);
-                const itemCgst = Math.round(it.price * 0.09);
-                const itemSgst = Math.round(it.price * 0.09);
-                return (
-                  <tr key={idx}>
-                    <td><strong>{it.title}</strong></td>
-                    <td><code>85183000</code></td>
-                    <td>{it.qty || 1}</td>
-                    <td>{formatCurrency(itemGross)}</td>
-                    <td>{formatCurrency(itemCgst)}</td>
-                    <td>{formatCurrency(itemSgst)}</td>
-                    <td><strong>{formatCurrency(it.price * (it.qty || 1))}</strong></td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginTop: '1.5rem', borderTop: '2px solid #e2e8f0', paddingTop: '1rem' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <div style={{ padding: '8px', border: '1px solid #cbd5e1', borderRadius: '6px', background: '#f8fafc' }}>
-                <QrCode size={48} color="#1e293b" />
-              </div>
-              <div style={{ fontSize: '0.78rem', color: '#64748b' }}>
-                <div>Scan QR to verify authentic GST invoice.</div>
-                <div>Authorized Signatory for Big Deal Retail India.</div>
-              </div>
+              <span style={{ fontSize: '0.78rem', background: '#dbeafe', color: '#1d4ed8', fontWeight: 700, padding: '4px 10px', borderRadius: '12px' }}>
+                No-Cost EMI Active
+              </span>
             </div>
 
-            <div style={{ width: '240px', fontSize: '0.9rem', lineHeight: 1.8 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span>Subtotal:</span>
-                <span>{formatCurrency(invoiceOrder.total)}</span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span>Delivery:</span>
-                <span style={{ color: '#15803d' }}>FREE</span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: '1px solid #cbd5e1', paddingTop: '4px', fontWeight: 800, fontSize: '1.1rem' }}>
-                <span>Grand Total:</span>
-                <span style={{ color: 'var(--amazon-price-red)' }}>{formatCurrency(invoiceOrder.total)}</span>
-              </div>
+            {/* Bank Selection Tabs */}
+            <div className="emi-bank-tabs">
+              {Object.keys(EMI_BANK_PLANS).map((b) => (
+                <button
+                  key={b}
+                  type="button"
+                  className={`emi-bank-btn ${selectedEmiBank === b ? 'active' : ''}`}
+                  onClick={() => setSelectedEmiBank(b)}
+                >
+                  {b === 'AMAZON_PAY' ? 'Big Deal Pay Later' : `${b} Bank`}
+                </button>
+              ))}
+            </div>
+
+            {/* EMI Tenure Table */}
+            <table className="emi-tenure-table">
+              <thead>
+                <tr>
+                  <th>EMI Plan</th>
+                  <th>Monthly Installment</th>
+                  <th>Interest Rate</th>
+                  <th>Total Cost</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(EMI_BANK_PLANS[selectedEmiBank] || EMI_BANK_PLANS['HDFC']).map((plan) => {
+                  const prodPrice = activeModalProduct ? activeModalProduct.price : 24999;
+                  const monthlyPrincipal = prodPrice / plan.months;
+                  const monthlyInterest = (prodPrice * (plan.rate / 100)) / 12;
+                  const emiPerMonth = Math.round(monthlyPrincipal + monthlyInterest);
+                  const totalCalculated = Math.round(emiPerMonth * plan.months);
+
+                  return (
+                    <tr key={plan.months}>
+                      <td>
+                        <strong>{plan.months} Months</strong>
+                        {plan.noCost && (
+                          <span style={{ fontSize: '0.72rem', background: '#dcfce7', color: '#166534', fontWeight: 800, padding: '1px 6px', borderRadius: '8px', marginLeft: '6px' }}>
+                            NO COST
+                          </span>
+                        )}
+                      </td>
+                      <td><strong style={{ color: '#0f1111' }}>{formatCurrency(emiPerMonth)}/mo</strong></td>
+                      <td>{plan.rate === 0 ? '0% Free' : `${plan.rate}% p.a.`}</td>
+                      <td>{formatCurrency(totalCalculated)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+
+            <div style={{ fontSize: '0.78rem', color: '#64748b', marginTop: '1rem', lineHeight: 1.5 }}>
+              *No Cost EMI is available on qualifying Credit Cards. Bank processing fees may apply as per individual bank policy.
             </div>
           </div>
         </div>
-      </div>
-    )}
-
-    {/* REAL-TIME SOCIAL PROOF & LIVE ACTIVITY TICKER (Bottom-Left Floating Toast) */}
-    {!isActivityDismissed && LIVE_PURCHASE_STREAM[liveActivityIndex] && (
-      <div 
-        className="live-activity-ticker" 
-        onClick={() => openProductDetails(LIVE_PURCHASE_STREAM[liveActivityIndex].product)}
-        title="Click to view product details"
-      >
-        <button 
-          type="button" 
-          className="activity-ticker-close"
-          onClick={(e) => {
-            e.stopPropagation();
-            setIsActivityDismissed(true);
-          }}
-          title="Dismiss Live Purchase Feed"
-        >
-          <X size={12} />
-        </button>
-
-        <div className="activity-avatar-wrap">
-          <span className="activity-avatar-emoji">{LIVE_PURCHASE_STREAM[liveActivityIndex].avatar}</span>
-          <span className="activity-live-ping"></span>
-        </div>
-
-        <div className="activity-text-content">
-          <div className="activity-top-row">
-            <strong className="activity-user-name">{LIVE_PURCHASE_STREAM[liveActivityIndex].name}</strong>
-            <span className="activity-city-pill">{LIVE_PURCHASE_STREAM[liveActivityIndex].city}</span>
-            <span className="activity-time-text">{LIVE_PURCHASE_STREAM[liveActivityIndex].time}</span>
-          </div>
-
-          <div className="activity-prod-title">
-            Just purchased <span style={{ color: '#007185', fontWeight: 700 }}>{LIVE_PURCHASE_STREAM[liveActivityIndex].product}</span>
-          </div>
-
-          <div className="activity-verified-row">
-            <span className="activity-verified-badge">
-              <CheckCircle2 size={11} color="#059669" /> Verified Prime Order
-            </span>
-            <span className="activity-price-tag">{formatCurrency(LIVE_PURCHASE_STREAM[liveActivityIndex].price)}</span>
-          </div>
-        </div>
-
-        <img 
-          src={LIVE_PURCHASE_STREAM[liveActivityIndex].image} 
-          alt="Purchased product thumbnail" 
-          className="activity-prod-thumb" 
-        />
-      </div>
-    )}
-
-    {/* FLOATING SMART ACTION DOCK */}
-    <aside className={`floating-smart-dock ${showScrollTop ? 'visible' : ''}`} aria-label="Quick Actions">
-      {cartCount > 0 && (
-        <button 
-          type="button" 
-          className="dock-cart-btn"
-          onClick={() => setIsCartOpen(true)}
-          title={`View Cart (${cartCount} items • ${formatCurrency(cartTotal)})`}
-        >
-          <ShoppingCart size={18} />
-          <span className="dock-cart-pill">{cartCount}</span>
-          <span className="dock-cart-sum">{formatCurrency(cartTotal)}</span>
-        </button>
       )}
 
-      <button 
-        type="button" 
-        className="dock-action-btn"
-        onClick={() => {
-          setSoundEnabled((prev) => !prev);
-          showToast(!soundEnabled ? 'Chime sound effects enabled' : 'Sound effects muted', 'info');
-        }}
-        title={soundEnabled ? 'Mute Audio Effects' : 'Enable Audio Chimes'}
-      >
-        {soundEnabled ? <Volume2 size={16} /> : <VolumeX size={16} />}
-      </button>
+      {/* BIG DEAL MINITV VIDEO SHOWCASE MODAL */}
+      {isMiniTvOpen && (
+        <div className="minitv-overlay" onClick={() => setIsMiniTvOpen(false)}>
+          <div className="minitv-player-box" onClick={(e) => e.stopPropagation()}>
+            <div style={{ padding: '0.75rem 1.25rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: '#111827', color: '#ffffff' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Tv size={18} color="#ec4899" />
+                <strong style={{ fontSize: '1rem' }}>Big Deal miniTV Live Shopping Stream</strong>
+              </div>
+              <button type="button" className="quickview-close-btn" style={{ color: '#ffffff' }} onClick={() => setIsMiniTvOpen(false)}>
+                <X size={18} />
+              </button>
+            </div>
 
-      <button 
-        type="button" 
-        className="dock-action-btn dock-scroll-top"
-        onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
-        title="Scroll to Top"
-      >
-        <ArrowUp size={16} />
-      </button>
-    </aside>
-  </div>
-);
+            <div className="minitv-video-screen">
+              <img
+                src="https://images.unsplash.com/photo-1505740420928-5e560c06d30e?auto=format&fit=crop&w=1200&q=80"
+                alt="Video Stream"
+                className="minitv-video-bg"
+              />
+
+              {/* Overlay Live Badge */}
+              <div style={{ position: 'absolute', top: '15px', left: '15px', display: 'flex', gap: '8px' }}>
+                <span className="minitv-live-tag">● LIVE DEMO</span>
+                <span style={{ background: 'rgba(0,0,0,0.65)', color: '#ffffff', fontSize: '0.75rem', padding: '2px 8px', borderRadius: '4px', fontWeight: 600 }}>
+                  👥 1,842 watching
+                </span>
+              </div>
+
+              {/* Floating Buy Now / Add to Cart Card */}
+              {miniTvProduct && (
+                <div className="minitv-buy-card">
+                  <img
+                    src={miniTvProduct.image_url}
+                    alt={miniTvProduct.title}
+                    style={{ width: '48px', height: '48px', objectFit: 'contain', background: '#ffffff', borderRadius: '6px' }}
+                  />
+                  <div>
+                    <div style={{ fontSize: '0.85rem', fontWeight: 700, maxWidth: '180px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {miniTvProduct.title}
+                    </div>
+                    <div style={{ fontSize: '0.9rem', color: '#febd69', fontWeight: 800 }}>
+                      {formatCurrency(miniTvProduct.price)}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="amazon-yellow-btn"
+                    style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem', fontWeight: 700 }}
+                    onClick={() => {
+                      addToCart(miniTvProduct);
+                      showToast(`Added ${miniTvProduct.title.slice(0, 18)}... to cart!`, 'success');
+                    }}
+                  >
+                    Buy in Stream
+                  </button>
+                </div>
+              )}
+
+              {/* In-Video Overlay Controls */}
+              <div className="minitv-overlay-controls">
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', color: '#ffffff' }}>
+                  <button
+                    type="button"
+                    onClick={() => setIsPlayingMiniTv(!isPlayingMiniTv)}
+                    style={{ color: '#ffffff', background: 'transparent', border: 'none', cursor: 'pointer' }}
+                  >
+                    {isPlayingMiniTv ? <Pause size={20} /> : <Play size={20} />}
+                  </button>
+                  <span style={{ fontSize: '0.82rem', fontWeight: 600 }}>Stream: "Hands-on Unboxing & Sound Quality Review"</span>
+                </div>
+                <button
+                  type="button"
+                  className="price-go-btn"
+                  style={{ background: 'rgba(255,255,255,0.2)', color: '#ffffff', borderColor: 'transparent', fontSize: '0.78rem' }}
+                  onClick={() => showToast('Shared live stream link to clipboard!', 'info')}
+                >
+                  <Share2 size={13} style={{ marginRight: 4 }} /> Share
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* PRINTABLE GST TAX INVOICE MODAL */}
+      {isInvoiceModalOpen && invoiceOrder && (
+        <div className="invoice-modal-overlay" onClick={() => setIsInvoiceModalOpen(false)}>
+          <div className="invoice-sheet" onClick={(e) => e.stopPropagation()}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+              <div className="amazon-logo-brand" style={{ fontSize: '1.4rem' }}>
+                <span>bigdeal<span className="domain">.in</span></span>
+              </div>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button
+                  type="button"
+                  className="amazon-yellow-btn"
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '0.45rem 1rem' }}
+                  onClick={() => window.print()}
+                >
+                  <Printer size={15} />
+                  <span>Print / Download PDF</span>
+                </button>
+                <button type="button" className="quickview-close-btn" onClick={() => setIsInvoiceModalOpen(false)}>
+                  <X size={18} />
+                </button>
+              </div>
+            </div>
+
+            <div className="invoice-header-grid">
+              <div>
+                <h2 style={{ fontSize: '1.2rem', fontWeight: 800, margin: 0 }}>Tax Invoice / Bill of Supply</h2>
+                <div style={{ fontSize: '0.82rem', color: '#4b5563', marginTop: '4px' }}>
+                  <div><strong>Invoice Number:</strong> BD-IN-{invoiceOrder.order_id || '982341'}</div>
+                  <div><strong>Invoice Date:</strong> {new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })}</div>
+                  <div><strong>GSTIN:</strong> 29AABCB2212M1ZX • <strong>CIN:</strong> U74900KA2015PTC082000</div>
+                </div>
+              </div>
+              <div style={{ textAlign: 'right', fontSize: '0.82rem', color: '#4b5563' }}>
+                <strong>Sold By:</strong>
+                <div>Big Deal Retail India Pvt. Ltd.</div>
+                <div>Amazon Gateway Logistics Campus</div>
+                <div>Bangalore, Karnataka - 560068</div>
+              </div>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', background: '#f8fafc', padding: '0.85rem', borderRadius: '8px', fontSize: '0.85rem' }}>
+              <div>
+                <strong>Billing Address:</strong>
+                <div>{invoiceOrder.customer_name || 'Alex Rivera'}</div>
+                <div>{shippingData.address}</div>
+                <div>{shippingData.city}, {shippingData.state} - {shippingData.zipCode}</div>
+                <div>Phone: {shippingData.phone}</div>
+              </div>
+              <div>
+                <strong>Shipping & Delivery Details:</strong>
+                <div>Carrier: {invoiceOrder.carrier || 'Big Deal Prime Express'}</div>
+                <div>Tracking ID: <code>{invoiceOrder.tracking_number || 'BD-TRK-7749210'}</code></div>
+                <div>Place of Supply: {shippingData.state || 'Tamil Nadu'} (State Code: 33)</div>
+              </div>
+            </div>
+
+            <table className="invoice-table">
+              <thead>
+                <tr>
+                  <th>Item Description</th>
+                  <th>HSN</th>
+                  <th>Qty</th>
+                  <th>Gross (₹)</th>
+                  <th>CGST (9%)</th>
+                  <th>SGST (9%)</th>
+                  <th>Total (₹)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(invoiceOrder.items && invoiceOrder.items.length > 0 ? invoiceOrder.items : [
+                  { title: 'AeroPulse Chrono Precision Analog Watch', price: invoiceOrder.total || 499, qty: 1 }
+                ]).map((it, idx) => {
+                  const itemGross = Math.round(it.price * 0.82);
+                  const itemCgst = Math.round(it.price * 0.09);
+                  const itemSgst = Math.round(it.price * 0.09);
+                  return (
+                    <tr key={idx}>
+                      <td><strong>{it.title}</strong></td>
+                      <td><code>85183000</code></td>
+                      <td>{it.qty || 1}</td>
+                      <td>{formatCurrency(itemGross)}</td>
+                      <td>{formatCurrency(itemCgst)}</td>
+                      <td>{formatCurrency(itemSgst)}</td>
+                      <td><strong>{formatCurrency(it.price * (it.qty || 1))}</strong></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginTop: '1.5rem', borderTop: '2px solid #e2e8f0', paddingTop: '1rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <div style={{ padding: '8px', border: '1px solid #cbd5e1', borderRadius: '6px', background: '#f8fafc' }}>
+                  <QrCode size={48} color="#1e293b" />
+                </div>
+                <div style={{ fontSize: '0.78rem', color: '#64748b' }}>
+                  <div>Scan QR to verify authentic GST invoice.</div>
+                  <div>Authorized Signatory for Big Deal Retail India.</div>
+                </div>
+              </div>
+
+              <div style={{ width: '240px', fontSize: '0.9rem', lineHeight: 1.8 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span>Subtotal:</span>
+                  <span>{formatCurrency(invoiceOrder.total)}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span>Delivery:</span>
+                  <span style={{ color: '#15803d' }}>FREE</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: '1px solid #cbd5e1', paddingTop: '4px', fontWeight: 800, fontSize: '1.1rem' }}>
+                  <span>Grand Total:</span>
+                  <span style={{ color: 'var(--amazon-price-red)' }}>{formatCurrency(invoiceOrder.total)}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* REAL-TIME SOCIAL PROOF & LIVE ACTIVITY TICKER (Bottom-Left Floating Toast) */}
+      {!isActivityDismissed && LIVE_PURCHASE_STREAM[liveActivityIndex] && (
+        <div
+          className="live-activity-ticker"
+          onClick={() => openProductDetails(LIVE_PURCHASE_STREAM[liveActivityIndex].product)}
+          title="Click to view product details"
+        >
+          <button
+            type="button"
+            className="activity-ticker-close"
+            onClick={(e) => {
+              e.stopPropagation();
+              setIsActivityDismissed(true);
+            }}
+            title="Dismiss Live Purchase Feed"
+          >
+            <X size={12} />
+          </button>
+
+          <div className="activity-avatar-wrap">
+            <span className="activity-avatar-emoji">{LIVE_PURCHASE_STREAM[liveActivityIndex].avatar}</span>
+            <span className="activity-live-ping"></span>
+          </div>
+
+          <div className="activity-text-content">
+            <div className="activity-top-row">
+              <strong className="activity-user-name">{LIVE_PURCHASE_STREAM[liveActivityIndex].name}</strong>
+              <span className="activity-city-pill">{LIVE_PURCHASE_STREAM[liveActivityIndex].city}</span>
+              <span className="activity-time-text">{LIVE_PURCHASE_STREAM[liveActivityIndex].time}</span>
+            </div>
+
+            <div className="activity-prod-title">
+              Just purchased <span style={{ color: '#007185', fontWeight: 700 }}>{LIVE_PURCHASE_STREAM[liveActivityIndex].product}</span>
+            </div>
+
+            <div className="activity-verified-row">
+              <span className="activity-verified-badge">
+                <CheckCircle2 size={11} color="#059669" /> Verified Prime Order
+              </span>
+              <span className="activity-price-tag">{formatCurrency(LIVE_PURCHASE_STREAM[liveActivityIndex].price)}</span>
+            </div>
+          </div>
+
+          <img
+            src={LIVE_PURCHASE_STREAM[liveActivityIndex].image}
+            alt="Purchased product thumbnail"
+            className="activity-prod-thumb"
+          />
+        </div>
+      )}
+
+      {/* FLOATING SMART ACTION DOCK */}
+      <aside className={`floating-smart-dock ${showScrollTop ? 'visible' : ''}`} aria-label="Quick Actions">
+        {cartCount > 0 && (
+          <button
+            type="button"
+            className="dock-cart-btn"
+            onClick={() => setIsCartOpen(true)}
+            title={`View Cart (${cartCount} items • ${formatCurrency(cartTotal)})`}
+          >
+            <ShoppingCart size={18} />
+            <span className="dock-cart-pill">{cartCount}</span>
+            <span className="dock-cart-sum">{formatCurrency(cartTotal)}</span>
+          </button>
+        )}
+
+        <button
+          type="button"
+          className="dock-action-btn"
+          onClick={() => {
+            setSoundEnabled((prev) => !prev);
+            showToast(!soundEnabled ? 'Chime sound effects enabled' : 'Sound effects muted', 'info');
+          }}
+          title={soundEnabled ? 'Mute Audio Effects' : 'Enable Audio Chimes'}
+        >
+          {soundEnabled ? <Volume2 size={16} /> : <VolumeX size={16} />}
+        </button>
+
+        <button
+          type="button"
+          className="dock-action-btn dock-scroll-top"
+          onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+          title="Scroll to Top"
+        >
+          <ArrowUp size={16} />
+        </button>
+      </aside>
+    </div>
+  );
 }
 
 export default App;
