@@ -149,25 +149,6 @@ flutter run
 
 ---
 
-## 🔐 Environment Variables
-
-Create a `.env` file inside the backend and configure the required environment variables.
-
-Example:
-
-```env
-DB_HOST=localhost
-DB_PORT=3306
-DB_NAME=your_database
-DB_USER=your_username
-DB_PASSWORD=your_password
-```
-
-**Never commit your `.env` file or database passwords to GitHub.**
-
----
-
-
 ## 🔄 Application Flow
 
 ```text
